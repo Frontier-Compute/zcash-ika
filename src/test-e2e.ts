@@ -324,11 +324,9 @@ async function main() {
   } catch {}
   console.log(`Public key: ${pubkeyHex}`);
 
-  // Get dWalletCap
-  const capsResult = await ikaClient.getOwnedDWalletCaps(address);
-  const cap = (capsResult.dWalletCaps || []).find((c: any) => c.dwallet_id === dwalletId);
-  if (!cap) throw new Error("No dWalletCap found");
-  console.log(`dWalletCap: ${cap.id}`);
+  // Use dWalletCap from DKG event (getOwnedDWalletCaps has BCS parsing issues)
+  if (!dwalletCapId) throw new Error("No dWalletCap from DKG event");
+  console.log(`dWalletCap: ${dwalletCapId}`);
 
   // Compute sighash
   const { sighash, description } = syntheticZcashSighash();
@@ -338,19 +336,23 @@ async function main() {
   // PHASE 2: PRESIGN
   console.log("\n=== PHASE 2: PRESIGN ===");
   const presignTx = new Transaction();
-  const presignIkaTx = new IkaTransaction({
-    ikaClient,
-    transaction: presignTx,
-    userShareEncryptionKeys: encKeys,
-  });
 
-  const presignIkaCoinObj = presignTx.object(ikaCoinId);
-  presignIkaTx.requestPresign({
-    dWallet,
-    signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: presignTx.splitCoins(presignIkaCoinObj, [50_000_000]),
-    suiCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
-  });
+  // Low-level presign (keyspring pattern)
+  coordinatorTransactions.requestPresign(
+    ikaConf,
+    presignTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
+    dwalletId!,
+    0, // ECDSASecp256k1 = 0
+    coordinatorTransactions.registerSessionIdentifier(
+      ikaConf,
+      presignTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
+      createRandomSessionIdentifier(),
+      presignTx,
+    ),
+    presignTx.object(ikaCoinId),
+    presignTx.gas,
+    presignTx,
+  );
 
   const presignResult = await suiClient.signAndExecuteTransaction({
     transaction: presignTx,
@@ -393,25 +395,42 @@ async function main() {
   const verifiedPresignCap = signIkaTx.verifyPresignCap({ presign: completedPresign });
 
   const messageApproval = signIkaTx.approveMessage({
-    dWalletCap: cap.id,
+    dWalletCap: dwalletCapId!,
     curve: Curve.SECP256K1,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
     hashScheme: Hash.DoubleSHA256,
     message: sighash,
   });
 
-  const signIkaCoinObj = signTx.object(ikaCoinId);
-  await signIkaTx.requestSign({
-    dWallet,
-    messageApproval,
-    hashScheme: Hash.DoubleSHA256,
+  // Use low-level sign to avoid coin split issues
+  coordinatorTransactions.requestSign(
+    ikaConf,
+    signTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
     verifiedPresignCap,
-    presign: completedPresign,
-    message: sighash,
-    signatureScheme: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: signTx.splitCoins(signIkaCoinObj, [50_000_000]),
-    suiCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
-  });
+    messageApproval,
+    await (async () => {
+      // Compute user sign message
+      const { createUserSignMessageWithPublicOutput } = await import("@ika.xyz/sdk");
+      const pp = await ikaClient.getProtocolPublicParameters(dWallet, Curve.SECP256K1);
+      const pubOut = new Uint8Array(Array.isArray(dWallet.state.Active.public_output)
+        ? dWallet.state.Active.public_output : Array.from(dWallet.state.Active.public_output));
+      // Decrypt user share from encrypted share
+      const { verifiedPublicOutput, secretShare } = await encKeys.decryptUserShare(
+        dWallet,
+        await ikaClient.getEncryptedUserSecretKeyShare(encShareId!),
+        pp,
+      );
+      return createUserSignMessageWithPublicOutput(
+        pp, verifiedPublicOutput, secretShare,
+        completedPresign.state.Completed.presign,
+        sighash, Hash.DoubleSHA256, SignatureAlgorithm.ECDSASecp256k1, Curve.SECP256K1,
+      );
+    })(),
+    signIkaTx.createSessionIdentifier(),
+    signTx.object(ikaCoinId),
+    signTx.gas,
+    signTx,
+  );
 
   const signResult = await suiClient.signAndExecuteTransaction({
     transaction: signTx,
