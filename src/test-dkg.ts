@@ -1,19 +1,17 @@
 // @ts-nocheck
 /**
- * Ika DKG test - create dWallets on testnet.
+ * Ika DKG test - create secp256k1 dWallet on testnet.
  *
- * Creates:
- * 1. Ed25519 dWallet (Zcash Orchard shielded)
- * 2. secp256k1 dWallet (Bitcoin + USDC + USDT + any EVM)
- *
- * One operator, split-key custody across all chains.
- * Swiss bank in your pocket. Jailbroken but legal tender.
+ * One secp256k1 dWallet signs for:
+ *   - Zcash transparent (t-addr, DoubleSHA256)
+ *   - Bitcoin (DoubleSHA256)
+ *   - Ethereum/EVM (KECCAK256)
  *
  * Requires: SUI_PRIVATE_KEY env var (base64 Sui keypair)
  * Get testnet SUI: https://faucet.sui.io
  *
  * Usage:
- *   SUI_PRIVATE_KEY=... node dist/test-dkg.js
+ *   SUI_PRIVATE_KEY=suiprivkey1... node dist/test-dkg.js
  */
 
 import { CoreClient } from "@mysten/sui/client";
@@ -30,28 +28,76 @@ import {
   publicKeyFromDWalletOutput,
   createRandomSessionIdentifier,
   CHAIN_PARAMS,
-  type Chain,
 } from "./index.js";
 
 const NETWORK = "testnet";
 
-async function createDWallet(
-  ikaClient: IkaClient,
-  suiClient: CoreClient,
-  keypair: Ed25519Keypair,
-  encKeys: UserShareEncryptionKeys,
-  chain: Chain,
-  address: string,
-) {
-  const params = CHAIN_PARAMS[chain];
-  console.log(`\n--- ${params.description} ---`);
-  console.log(`Params: ${params.curve}/${params.algorithm}/${params.hash}`);
+async function main() {
+  const privKeyRaw = process.env.SUI_PRIVATE_KEY;
+  if (!privKeyRaw) {
+    console.log("zcash-ika DKG test");
+    console.log("==================");
+    console.log("");
+    console.log("Creates a secp256k1 dWallet on Ika testnet.");
+    console.log("One key signs for Zcash transparent, Bitcoin, and Ethereum.");
+    console.log("");
+    console.log("Chain params:");
+    for (const [chain, params] of Object.entries(CHAIN_PARAMS)) {
+      console.log(`  ${chain}: ${params.curve}/${params.algorithm}/${params.hash}`);
+    }
+    console.log("");
+    console.log("Usage:");
+    console.log("  SUI_PRIVATE_KEY=suiprivkey1... node dist/test-dkg.js");
+    console.log("  Get testnet SUI: https://faucet.sui.io");
+    return;
+  }
 
-  // Prepare DKG (async fetches protocol public params from network)
+  // Decode Sui keypair
+  const decoded = decodeSuiPrivateKey(privKeyRaw);
+  const keypair = Ed25519Keypair.fromSecretKey(decoded.secretKey);
+  const address = keypair.getPublicKey().toSuiAddress();
+  console.log(`Sui address: ${address}`);
+
+  // Init clients
+  const { SuiJsonRpcClient } = await import("@mysten/sui/jsonRpc");
+  const suiClient = new SuiJsonRpcClient({ url: "https://sui-testnet-rpc.publicnode.com" });
+  const ikaConfig = getNetworkConfig(NETWORK);
+  if (!ikaConfig) throw new Error("No Ika testnet config");
+
+  const ikaClient = new IkaClient({
+    suiClient,
+    config: ikaConfig,
+    cache: true,
+    encryptionKeyOptions: { autoDetect: true },
+  });
+  await ikaClient.initialize();
+  console.log("Ika client initialized on testnet");
+
+  // Check balance
+  const balance = await suiClient.getBalance({ owner: address });
+  const suiBalance = Number(balance.totalBalance) / 1e9;
+  console.log(`SUI balance: ${suiBalance} SUI`);
+
+  if (suiBalance < 0.2) {
+    console.log("Need at least 0.2 SUI for gas.");
+    console.log("Get testnet SUI: https://faucet.sui.io");
+    return;
+  }
+
+  // Generate encryption keys for secp256k1
+  const seed = new Uint8Array(32);
+  crypto.getRandomValues(seed);
+  const encKeys = await UserShareEncryptionKeys.fromRootSeedKey(seed, Curve.SECP256K1);
+  console.log("secp256k1 encryption keys generated");
+
+  // Save seed for later signing (in production, derive from operator's master key)
+  console.log("Encryption seed (save this for signing):", Buffer.from(seed).toString("hex"));
+
+  // Prepare DKG
   const bytesToHash = createRandomSessionIdentifier();
   const dkgInput = await prepareDKGAsync(
     ikaClient,
-    Curve[params.curve],
+    Curve.SECP256K1,
     encKeys,
     bytesToHash,
     address,
@@ -69,20 +115,15 @@ async function createDWallet(
   const sessionId = ikaTx.registerSessionIdentifier(bytesToHash);
 
   // Get network encryption key
-  const networkEncKey = await (ikaClient as any).getLatestNetworkEncryptionKey?.()
+  const networkEncKey = await ikaClient.getLatestNetworkEncryptionKey?.()
     || await (ikaClient as any).getConfiguredNetworkEncryptionKey?.();
-
-  if (!networkEncKey) {
-    // Try without - some SDK versions auto-detect
-    console.log("No explicit encryption key method found, trying auto-detect...");
-  }
 
   // Submit DKG request
   const dkgResult = await (ikaTx as any).requestDWalletDKG({
     dkgRequestInput: dkgInput,
     sessionIdentifier: sessionId,
     dwalletNetworkEncryptionKeyId: networkEncKey?.id,
-    curve: Curve[params.curve],
+    curve: Curve.SECP256K1,
     ikaCoin: tx.splitCoins(tx.gas, [50_000_000]),
     suiCoin: tx.splitCoins(tx.gas, [50_000_000]),
   });
@@ -97,100 +138,50 @@ async function createDWallet(
 
   if (result.effects?.status?.status !== "success") {
     console.error("TX failed:", result.effects?.status?.error);
-    return null;
+    return;
   }
 
-  console.log("DKG submitted. Poll for completion...");
-
-  // Extract dWallet ID from events/created objects
+  // Extract created objects
   const created = result.effects?.created || [];
   console.log(`Created ${created.length} objects`);
   for (const obj of created) {
-    console.log(`  ${(obj.reference as any)?.objectId || obj}`);
+    const id = (obj.reference as any)?.objectId || obj;
+    console.log(`  ${id}`);
   }
 
-  return result;
-}
-
-async function main() {
-  const privKeyRaw = process.env.SUI_PRIVATE_KEY;
-  if (!privKeyRaw) {
-    console.log("zcash-ika DKG test");
-    console.log("==================");
-    console.log("");
-    console.log("Chain params (what Ika signs for each chain):");
-    for (const [chain, params] of Object.entries(CHAIN_PARAMS)) {
-      console.log(`  ${chain}: ${params.curve}/${params.algorithm}/${params.hash}`);
+  // Poll for dWallet to become Active (testnet can be slow)
+  console.log("\nPolling for dWallet completion (up to 5 min)...");
+  for (const obj of created) {
+    const id = (obj.reference as any)?.objectId;
+    if (!id) continue;
+    try {
+      const dw = await ikaClient.getDWalletInParticularState(id, "Active", {
+        timeout: 300_000,
+        interval: 3000,
+        maxInterval: 10_000,
+        backoffMultiplier: 1.5,
+      });
+      if (dw) {
+        console.log(`\ndWallet Active: ${id}`);
+        // Extract public key
+        try {
+          const pubkey = await publicKeyFromDWalletOutput(
+            Curve.SECP256K1,
+            dw.state?.Active?.public_output || dw.publicOutput,
+          );
+          console.log("Public key:", Buffer.from(pubkey).toString("hex"));
+        } catch {
+          console.log("(could not extract public key from output)");
+        }
+        console.log("\nSave this dWallet ID for signing:");
+        console.log(`  DWALLET_ID=${id}`);
+        break;
+      }
+    } catch (err: any) {
+      // Not a dWallet object, skip
+      if (!err.message?.includes("timeout")) continue;
+      console.log(`Timeout waiting for ${id} - testnet may need longer`);
     }
-    console.log("");
-    console.log("secp256k1/ECDSA/DoubleSHA256 signs for:");
-    console.log("  - Bitcoin (BTC)");
-    console.log("  - Zcash transparent (t-addr)");
-    console.log("  - Ethereum/Base (USDC, USDT) via KECCAK256 variant");
-    console.log("");
-    console.log("Ed25519/EdDSA/SHA512 signs for:");
-    console.log("  - Zcash Orchard (shielded ZEC)");
-    console.log("");
-    console.log("One operator. Split-key custody. Every chain.");
-    console.log("");
-    console.log("To run DKG:");
-    console.log("  SUI_PRIVATE_KEY=suiprivkey1... node dist/test-dkg.js");
-    console.log("  Get testnet SUI: https://faucet.sui.io");
-    return;
-  }
-
-  // Decode Sui keypair
-  const decoded = decodeSuiPrivateKey(privKeyRaw);
-  const keypair = Ed25519Keypair.fromSecretKey(decoded.secretKey);
-  const address = keypair.getPublicKey().toSuiAddress();
-  console.log(`Sui address: ${address}`);
-
-  // Init clients
-  // PublicNode doesn't rate limit like Mysten's public RPC
-  const { SuiJsonRpcClient } = await import("@mysten/sui/jsonRpc");
-  const suiClient = new SuiJsonRpcClient({ url: "https://sui-testnet-rpc.publicnode.com" });
-  const ikaConfig = getNetworkConfig(NETWORK);
-  if (!ikaConfig) throw new Error("No Ika testnet config");
-
-  const ikaClient = new IkaClient({ suiClient, config: ikaConfig });
-  await ikaClient.initialize();
-  console.log("Ika client initialized on testnet");
-
-  // Check balance
-  const balance = await suiClient.getBalance({ owner: address });
-  const suiBalance = Number(balance.totalBalance) / 1e9;
-  console.log(`SUI balance: ${suiBalance} SUI`);
-
-  if (suiBalance < 0.2) {
-    console.log("Need at least 0.2 SUI for gas (two DKG operations).");
-    console.log("Get testnet SUI: https://faucet.sui.io");
-    return;
-  }
-
-  // Generate encryption keys - one per curve
-  const seed = new Uint8Array(32);
-  crypto.getRandomValues(seed);
-
-  // Ed25519 encryption keys for shielded ZEC wallet
-  const edEncKeys = await UserShareEncryptionKeys.fromRootSeedKey(seed, Curve.ED25519);
-  console.log("Ed25519 encryption keys generated");
-
-  // secp256k1 encryption keys for BTC/stablecoin wallet
-  const secpEncKeys = await UserShareEncryptionKeys.fromRootSeedKey(seed, Curve.SECP256K1);
-  console.log("secp256k1 encryption keys generated");
-
-  // Create Ed25519 dWallet (Zcash Orchard)
-  try {
-    await createDWallet(ikaClient, suiClient, keypair, edEncKeys, "zcash-shielded", address);
-  } catch (err) {
-    console.error("Ed25519 DKG error:", (err as Error).message);
-  }
-
-  // Create secp256k1 dWallet (Bitcoin + stablecoins)
-  try {
-    await createDWallet(ikaClient, suiClient, keypair, secpEncKeys, "bitcoin", address);
-  } catch (err) {
-    console.error("secp256k1 DKG error:", (err as Error).message);
   }
 
   console.log("\nDone.");

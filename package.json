@@ -1,12 +1,13 @@
 {
   "name": "@frontiercompute/zcash-ika",
   "version": "0.1.0",
-  "description": "Zero-trust Zcash agent custody via Ika dWallet. Born shielded, stay shielded.",
+  "description": "Split-key Zcash custody via Ika dWallet. secp256k1 MPC for transparent, hybrid model for shielded.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-vm-modules dist/test.js"
+    "test:dkg": "node dist/test-dkg.js",
+    "test:sign": "node dist/test-sign.js"
   },
   "dependencies": {
     "@ika.xyz/sdk": "^0.3.1",
@@ -16,7 +17,7 @@
     "@types/node": "^25.5.2",
     "typescript": "^5.4.0"
   },
-  "files": ["dist/index.js", "dist/index.d.ts"],
+  "files": ["dist/index.js", "dist/index.d.ts", "dist/hybrid.js", "dist/hybrid.d.ts"],
   "repository": {
     "type": "git",
     "url": "https://github.com/Frontier-Compute/zcash-ika.git"

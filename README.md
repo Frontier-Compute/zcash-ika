@@ -8,13 +8,11 @@ Split-key custody for Zcash, Bitcoin, and EVM chains. The private key never exis
 
 One secp256k1 dWallet on [Ika's 2PC-MPC network](https://ika.xyz) signs for Zcash transparent, Bitcoin, and Ethereum. Your device holds half the key. Ika's nodes hold the other half. Spending policy enforced by Sui Move contract. Every action attested on Zcash via [ZAP1](https://pay.frontiercompute.io).
 
-secp256k1 dWallet live on Ika testnet. Presign and signing pipeline verified.
-
 ## What works today
 
 | Chain | Curve | Algorithm | Hash | Status |
 |-------|-------|-----------|------|--------|
-| Zcash transparent | secp256k1 | ECDSA | DoubleSHA256 | dWallet on testnet, signing in progress |
+| Zcash transparent | secp256k1 | ECDSA | DoubleSHA256 | dWallet on testnet, signing wired |
 | Bitcoin | secp256k1 | ECDSA | DoubleSHA256 | Same dWallet, same key |
 | Ethereum/EVM | secp256k1 | ECDSA | KECCAK256 | Same dWallet, different hash |
 
@@ -22,9 +20,9 @@ One dWallet. Three chain families. Split custody on all of them.
 
 ## What does NOT work
 
-**Zcash shielded (Orchard)** requires RedPallas signatures on the Pallas curve. Ika's MPC supports secp256k1 and Ed25519, but not Pallas. There is no path from Ika to Orchard signing today. Same limitation applies to Sapling (RedJubjub on the Jubjub curve).
+**Zcash shielded (Orchard)** requires RedPallas signatures on the Pallas curve. Ika's MPC supports secp256k1 and Ed25519, but not Pallas. There is no path from Ika to Orchard signing today. Same for Sapling (RedJubjub on Jubjub).
 
-Transparent ZEC is the viable path. For shielded operations, use our [embedded Orchard wallet](https://github.com/Frontier-Compute/zap1) which holds keys directly.
+For shielded operations, use the [embedded Orchard wallet](https://github.com/Frontier-Compute/zap1) which holds keys directly. The hybrid architecture: MPC custody for transparent + cross-chain, local wallet for shielded.
 
 ## Install
 
@@ -36,44 +34,40 @@ npm install @frontiercompute/zcash-ika
 
 ```typescript
 import {
+  createWallet,
+  sign,
   createDualCustody,
-  spendTransparent,
-  spendBitcoin,
-  setPolicy,
   getHistory,
   checkCompliance,
   CHAIN_PARAMS,
 } from "@frontiercompute/zcash-ika";
 
 const config = {
-  network: "mainnet",
-  zebraRpcUrl: "http://127.0.0.1:8232",
+  network: "testnet",
+  suiPrivateKey: "suiprivkey1...",
   zap1ApiUrl: "https://pay.frontiercompute.io",
-  zap1ApiKey: "your-key",
 };
 
 // Create split-key wallet (secp256k1 - signs for ZEC + BTC + ETH)
-const custody = await createDualCustody(config, operatorSeed);
+const custody = await createDualCustody(config);
+console.log("dWallet:", custody.primary.id);
+console.log("Save this seed:", custody.primary.encryptionSeed);
 
-// Set spending policy (enforced by Sui contract, not by trust)
-await setPolicy(config, custody.primary.id, {
-  maxPerTx: 100_000,
-  maxDaily: 1_000_000,
-  allowedRecipients: [],
-  approvalThreshold: 500_000,
+// Sign a Zcash transparent sighash through MPC
+const result = await sign(config, {
+  messageHash: sighashBytes, // DoubleSHA256 of the tx
+  walletId: custody.primary.id,
+  chain: "zcash-transparent",
+  encryptionSeed: custody.primary.encryptionSeed,
 });
+console.log("Signature:", Buffer.from(result.signature).toString("hex"));
 
-// Transparent ZEC spend
-const result = await spendTransparent(config, custody.primary.id, operatorSeed, {
-  to: "t1abc...",
-  amount: 50_000,
-  memo: "payment for API access",
-});
-
-// Bitcoin spend (same dWallet, same MPC flow)
-const btcResult = await spendBitcoin(config, custody.primary.id, operatorSeed, {
-  to: "bc1q...",
-  amount: 100_000,
+// Sign Bitcoin (same dWallet, same MPC, same seed)
+const btcSig = await sign(config, {
+  messageHash: btcSighash,
+  walletId: custody.primary.id,
+  chain: "bitcoin",
+  encryptionSeed: custody.primary.encryptionSeed,
 });
 
 // Compliance check (works now against live ZAP1 API)
@@ -85,7 +79,7 @@ const compliance = await checkCompliance(config, custody.primary.id);
 ```
 Operator (phone / hardware wallet)
   |
-  | user key share
+  | user key share (encryption seed)
   |
 Ika MPC Network (2PC-MPC on Sui)
   |
@@ -104,6 +98,13 @@ ZAP1 Attestation (Zcash mainnet)
   +-- full audit trail
 ```
 
+## Sign flow (two transactions)
+
+1. **Presign** - pre-compute MPC ephemeral key share (TX 1, poll for completion)
+2. **Sign** - approve message + request signature (TX 2, poll for completion)
+
+Both transactions on Sui. The user partial signature is computed locally via WASM. Neither party ever sees the full private key.
+
 ## On-chain proof
 
 secp256k1 dWallet created on Ika testnet:
@@ -114,7 +115,15 @@ secp256k1 dWallet created on Ika testnet:
 - Derived BTC: `moV3JAzgNa6NkxVfdaNqUjLoDxKEwNAnkX`
 - Derived ZEC t-addr: `t1Rqh1TKqXsSiaV4wrSDandEPccucpHEudn`
 
-Ed25519 dWallet also exists on testnet but cannot sign Orchard transactions (RedPallas required, not Ed25519).
+## Test scripts
+
+```bash
+# Create a new dWallet (saves encryption seed)
+SUI_PRIVATE_KEY=suiprivkey1... node dist/test-dkg.js
+
+# Sign a test message through MPC
+SUI_PRIVATE_KEY=... DWALLET_ID=0x... ENC_SEED=... node dist/test-sign.js
+```
 
 ## Stack
 
