@@ -16,5 +16,12 @@
     "@types/node": "^25.5.2",
     "typescript": "^5.4.0"
   },
+  "files": ["dist/index.js", "dist/index.d.ts"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Frontier-Compute/zcash-ika.git"
+  },
+  "author": "zk_nd3r <zk_nd3r@frontiercompute.io>",
+  "keywords": ["zcash", "ika", "dwallet", "mpc", "custody", "bitcoin", "split-key"],
   "license": "MIT"
 }
