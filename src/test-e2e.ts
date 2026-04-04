@@ -338,7 +338,8 @@ async function main() {
   const presignTx = new Transaction();
 
   // Low-level presign (keyspring pattern)
-  coordinatorTransactions.requestPresign(
+  // requestPresign returns UnverifiedPresignCap - must be transferred
+  const unverifiedPresignCap = coordinatorTransactions.requestPresign(
     ikaConf,
     presignTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
     dwalletId!,
@@ -353,6 +354,7 @@ async function main() {
     presignTx.gas,
     presignTx,
   );
+  presignTx.transferObjects([unverifiedPresignCap], address);
 
   const presignResult = await suiClient.signAndExecuteTransaction({
     transaction: presignTx,
