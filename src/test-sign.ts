@@ -132,6 +132,22 @@ async function main() {
   console.log(`\nTest message: "${new TextDecoder().decode(testMessage)}"`);
   console.log(`Message bytes: ${Buffer.from(testMessage).toString("hex")}`);
 
+  // Fetch IKA coins - IKA is a separate token from SUI, can't split from gas
+  const IKA_COIN_TYPE = "0x1f26bb2f711ff82dcda4d02c77d5123089cb7f8418751474b9fb744ce031526a::ika::IKA";
+  const ikaResp = await fetch("https://sui-testnet-rpc.publicnode.com", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "suix_getCoins", params: [address, IKA_COIN_TYPE, null, 5] }),
+  });
+  const ikaData = (await ikaResp.json()) as any;
+  const ikaCoins = ikaData.result?.data || [];
+  if (ikaCoins.length === 0) {
+    console.log("No IKA tokens. Get them from https://faucet.ika.xyz");
+    return;
+  }
+  const ikaCoinId = ikaCoins[0].coinObjectId;
+  console.log(`IKA coin: ${ikaCoinId} (${Number(ikaCoins[0].balance) / 1e9} IKA)`);
+
   // STEP 1: Request presign
   console.log("\n--- Step 1: Presign ---");
   const presignTx = new Transaction();
@@ -141,12 +157,22 @@ async function main() {
     userShareEncryptionKeys: encKeys,
   });
 
+  // IKA coin passed as object ref (Move takes &mut, coin survives the call)
+  const presignIkaCoin = presignTx.object(ikaCoinId);
+  const presignSuiCoin = presignTx.splitCoins(presignTx.gas, [50_000_000]);
+
   const unverifiedPresignCap = presignIkaTx.requestPresign({
     dWallet,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
-    suiCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
+    ikaCoin: presignIkaCoin,
+    suiCoin: presignSuiCoin,
   });
+
+  // Transfer split SUI coin back and presign cap to ourselves
+  presignTx.transferObjects([presignSuiCoin], address);
+  if (unverifiedPresignCap) {
+    presignTx.transferObjects([unverifiedPresignCap], address);
+  }
 
   console.log("Submitting presign request...");
   const presignResult = await suiClient.signAndExecuteTransaction({
@@ -226,6 +252,21 @@ async function main() {
     message: testMessage,
   });
 
+  // Re-fetch IKA coins (version may have changed after presign tx)
+  const ikaResp2 = await fetch("https://sui-testnet-rpc.publicnode.com", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "suix_getCoins", params: [address, IKA_COIN_TYPE, null, 5] }),
+  });
+  const ikaData2 = (await ikaResp2.json()) as any;
+  const ikaCoins2 = ikaData2.result?.data || [];
+  if (ikaCoins2.length === 0) throw new Error("No IKA coins for sign tx");
+  const signIkaCoinId = ikaCoins2[0].coinObjectId;
+
+  // IKA coin as object ref, SUI split from gas
+  const signIkaCoin = signTx.object(signIkaCoinId);
+  const signSuiCoin = signTx.splitCoins(signTx.gas, [50_000_000]);
+
   // Request the actual signature
   const signatureId = await signIkaTx.requestSign({
     dWallet,
@@ -236,9 +277,12 @@ async function main() {
     encryptedUserSecretKeyShare: undefined,
     message: testMessage,
     signatureScheme: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
-    suiCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
+    ikaCoin: signIkaCoin,
+    suiCoin: signSuiCoin,
   });
+
+  // Transfer split SUI coin back
+  signTx.transferObjects([signSuiCoin], address);
 
   console.log("Submitting sign request...");
   const signResult = await suiClient.signAndExecuteTransaction({
