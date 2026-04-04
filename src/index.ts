@@ -446,7 +446,9 @@ export async function sign(
     throw new Error(`Presign TX failed: ${presignResult.effects?.status?.error}`);
   }
 
-  // Find presign session and poll for completion
+  // Find presign session and poll for completion.
+  // Poll manually instead of using getPresignInParticularState so we can
+  // detect NetworkRejected early rather than burning the full timeout.
   const presignCreated = presignResult.effects?.created || [];
   let completedPresign: any = null;
 
@@ -454,17 +456,37 @@ export async function sign(
     const id = (obj as any).reference?.objectId || (obj as any).objectId;
     if (!id) continue;
     try {
-      completedPresign = await ikaClient.getPresignInParticularState(
-        id, "Completed", POLL_OPTS,
-      );
+      const startTime = Date.now();
+      let interval = POLL_OPTS.interval || 3_000;
+      while (Date.now() - startTime < (POLL_OPTS.timeout || 300_000)) {
+        const presign = await ikaClient.getPresign(id);
+        const kind = presign?.state?.$kind;
+        if (kind === "Completed") {
+          completedPresign = presign;
+          break;
+        }
+        if (kind === "NetworkRejected") {
+          throw new Error(
+            `Presign ${id} rejected by network (state: NetworkRejected). ` +
+            `This usually means the MPC round was aborted by validators. ` +
+            `Retry or check Ika network status.`
+          );
+        }
+        await new Promise(r => setTimeout(r, interval));
+        interval = Math.min(
+          interval * (POLL_OPTS.backoffMultiplier || 1.5),
+          POLL_OPTS.maxInterval || 10_000
+        );
+      }
       if (completedPresign) break;
-    } catch {
-      // Not a presign object or timeout
+    } catch (e: any) {
+      if (e.message?.includes("NetworkRejected")) throw e;
+      // Not a presign object or fetch error, try next created object
     }
   }
 
   if (!completedPresign) {
-    throw new Error("Presign TX succeeded but could not get completed presign session");
+    throw new Error("Presign TX succeeded but timed out waiting for completion. Check Ika network status.");
   }
 
   // TX 2: Approve message + sign
@@ -510,7 +532,8 @@ export async function sign(
     throw new Error(`Sign TX failed: ${signResult.effects?.status?.error}`);
   }
 
-  // Find sign session and poll for signature
+  // Find sign session and poll for signature.
+  // Same manual polling as presign to detect NetworkRejected early.
   const signCreated = signResult.effects?.created || [];
   let completedSign: any = null;
 
@@ -518,21 +541,38 @@ export async function sign(
     const id = (obj as any).reference?.objectId || (obj as any).objectId;
     if (!id) continue;
     try {
-      completedSign = await ikaClient.getSignInParticularState(
-        id,
-        Curve.SECP256K1,
-        SignatureAlgorithm.ECDSASecp256k1,
-        "Completed",
-        POLL_OPTS,
-      );
+      const startTime = Date.now();
+      let interval = POLL_OPTS.interval || 3_000;
+      while (Date.now() - startTime < (POLL_OPTS.timeout || 300_000)) {
+        const sign = await ikaClient.getSign(
+          id, Curve.SECP256K1, SignatureAlgorithm.ECDSASecp256k1
+        );
+        const kind = sign?.state?.$kind;
+        if (kind === "Completed") {
+          completedSign = sign;
+          break;
+        }
+        if (kind === "NetworkRejected") {
+          throw new Error(
+            `Sign ${id} rejected by network (state: NetworkRejected). ` +
+            `MPC signing round aborted. Retry or check Ika network status.`
+          );
+        }
+        await new Promise(r => setTimeout(r, interval));
+        interval = Math.min(
+          interval * (POLL_OPTS.backoffMultiplier || 1.5),
+          POLL_OPTS.maxInterval || 10_000
+        );
+      }
       if (completedSign) break;
-    } catch {
-      // Not a sign object or timeout
+    } catch (e: any) {
+      if (e.message?.includes("NetworkRejected")) throw e;
+      // Not a sign object or fetch error, try next created object
     }
   }
 
   if (!completedSign?.state?.Completed?.signature) {
-    throw new Error("Sign TX succeeded but could not get completed signature");
+    throw new Error("Sign TX succeeded but timed out waiting for signature. Check Ika network status.");
   }
 
   const rawSig = completedSign.state.Completed.signature;
