@@ -1,0 +1,19 @@
+{
+  "name": "@frontiercompute/zcash-ika",
+  "version": "0.1.0",
+  "description": "Zero-trust Zcash agent custody via Ika dWallet. Born shielded, stay shielded.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules dist/test.js"
+  },
+  "dependencies": {
+    "@ika.xyz/sdk": "^0.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^5.4.0"
+  },
+  "license": "MIT"
+}
