@@ -159,7 +159,6 @@ async function main() {
   crypto.getRandomValues(seed);
   const encKeys = await UserShareEncryptionKeys.fromRootSeedKey(seed, Curve.SECP256K1);
   const seedHex = Buffer.from(seed).toString("hex");
-  console.log(`Encryption seed: ${seedHex}`);
 
   // PHASE 1: DKG
   console.log("\n=== PHASE 1: DKG ===");

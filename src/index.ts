@@ -429,11 +429,13 @@ export async function sign(
   });
 
   const presignIkaCoin = presignTx.object(ikaCoinId);
-  presignIkaTx.requestPresign({
-    dWallet,
+  const presignSuiCoin = presignTx.splitCoins(presignTx.gas, [50_000_000]);
+  presignIkaTx.requestGlobalPresign({
+    dwalletNetworkEncryptionKeyId: dWallet.dwallet_network_encryption_key_id,
+    curve: Curve.SECP256K1,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: presignTx.splitCoins(presignIkaCoin, [50_000_000]),
-    suiCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
+    ikaCoin: presignIkaCoin,
+    suiCoin: presignSuiCoin,
   });
 
   const presignResult = await suiClient.signAndExecuteTransaction({

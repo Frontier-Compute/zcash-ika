@@ -91,7 +91,8 @@ async function main() {
   console.log("secp256k1 encryption keys generated");
 
   // Save seed for later signing (in production, derive from operator's master key)
-  console.log("Encryption seed (save this for signing):", Buffer.from(seed).toString("hex"));
+  // Seed saved to DWalletHandle, not logged for security
+    // console.log("Encryption seed:, Buffer.from(seed).toString("hex"));
 
   // Prepare DKG
   const bytesToHash = createRandomSessionIdentifier();
