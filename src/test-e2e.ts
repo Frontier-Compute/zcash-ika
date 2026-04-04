@@ -282,8 +282,8 @@ async function main() {
   const stateKey = Object.keys(dWallet.state || {})[0];
   if (stateKey === "AwaitingKeyHolderSignature" && encShareId) {
     console.log("\n--- Accepting encrypted share ---");
-    const pubOutput = dWallet.state.AwaitingKeyHolderSignature?.public_output;
-    const userOutputSig = await encKeys.getUserOutputSignature(dWallet, pubOutput);
+    // Must use the userPublicOutput from prepareDKGAsync, not the chain's public_output
+    const userOutputSig = await encKeys.getUserOutputSignature(dWallet, dkgInput.userPublicOutput);
 
     const acceptTx = new Transaction();
     coordinatorTransactions.acceptEncryptedUserShare(
