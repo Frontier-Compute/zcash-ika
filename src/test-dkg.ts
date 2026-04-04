@@ -134,19 +134,38 @@ async function main() {
   const ikaCoinId = ikaCoins[0].coinObjectId;
   console.log(`IKA coin: ${ikaCoinId} (${Number(ikaCoins[0].balance) / 1e9} IKA)`);
 
-  // Submit DKG request (ikaCoin = IKA token, suiCoin = SUI gas)
+  // Submit DKG using WithPublicUserShare (simpler, no encryption round-trip)
+  // Pass both coins directly as objects (DKG takes &mut, coins survive the call)
   const ikaCoinObj = tx.object(ikaCoinId);
-  const dkgReturn = await (ikaTx as any).requestDWalletDKG({
-    dkgRequestInput: dkgInput,
+  const suiSplit = tx.splitCoins(tx.gas, [50_000_000]);
+  const dkgReturn = await (ikaTx as any).requestDWalletDKGWithPublicUserShare({
     sessionIdentifier: sessionId,
     dwalletNetworkEncryptionKeyId: networkEncKey?.id,
     curve: Curve.SECP256K1,
-    ikaCoin: tx.splitCoins(ikaCoinObj, [50_000_000]),
-    suiCoin: tx.splitCoins(tx.gas, [50_000_000]),
+    publicKeyShareAndProof: dkgInput.userDKGMessage,
+    publicUserSecretKeyShare: dkgInput.userSecretKeyShare,
+    userPublicOutput: dkgInput.userPublicOutput,
+    ikaCoin: ikaCoinObj,
+    suiCoin: suiSplit,
   });
-  // Transfer DWalletCap to ourselves
+  // Return the split SUI coin to sender (DKG takes &mut, coin survives)
+  tx.transferObjects([suiSplit], address);
+  // DKG returns (DWalletCap, Option<ID>) - transfer cap, destroy the None option
   if (dkgReturn) {
-    tx.transferObjects([dkgReturn], address);
+    tx.transferObjects([dkgReturn[0]], address);
+    tx.moveCall({
+      target: "0x1::option::destroy_none",
+      typeArguments: ["0x2::object::ID"],
+      arguments: [dkgReturn[1]],
+    });
+  }
+
+  // Debug: inspect transaction commands
+  const txData = tx.getData();
+  console.log(`Transaction has ${txData.commands.length} commands:`);
+  for (let i = 0; i < txData.commands.length; i++) {
+    const cmd = txData.commands[i];
+    console.log(`  [${i}] ${cmd.$kind}${cmd.$kind === 'MoveCall' ? ` -> ${(cmd as any).MoveCall?.function}` : ''}`);
   }
 
   console.log("Submitting DKG to Ika network...");

@@ -99,22 +99,33 @@ async function main() {
     throw new Error(`dWallet not Active (state: ${stateKey}). Run test-dkg first.`);
   }
 
-  // Get dWalletCap for this address
-  console.log("\nFetching dWalletCaps...");
-  const capsResult = await ikaClient.getOwnedDWalletCaps(address);
-  const caps = capsResult.dWalletCaps || [];
-  console.log(`Found ${caps.length} dWalletCap(s)`);
-
-  // Find the cap that owns our dWallet
-  const cap = caps.find((c: any) => c.dwallet_id === dwalletId);
-  if (!cap) {
-    console.log("Available caps:");
-    for (const c of caps) {
-      console.log(`  cap ${c.id} -> dWallet ${c.dwallet_id}`);
+  // Get dWalletCap - use DWALLET_CAP env var or scan owned objects
+  let capId = process.env.DWALLET_CAP;
+  if (!capId) {
+    console.log("\nScanning owned objects for DWalletCap...");
+    const { SuiJsonRpcClient: Rpc } = await import("@mysten/sui/jsonRpc");
+    const rpc = new Rpc({ url: "https://sui-testnet-rpc.publicnode.com" });
+    const owned = await rpc.getOwnedObjects({
+      owner: address,
+      filter: { StructType: "0xf02f5960c94fce1899a3795b5d11fd076bc70a8d0e20a2b19923d990ed490730::coordinator_inner::DWalletCap" },
+      options: { showContent: true },
+    });
+    const caps = owned.data || [];
+    const cap = caps.find((c: any) => {
+      const fields = c.data?.content?.fields;
+      return fields?.dwallet_id === dwalletId;
+    });
+    if (!cap) {
+      console.log(`Found ${caps.length} caps, none match dWallet ${dwalletId}`);
+      for (const c of caps) {
+        const f = (c.data?.content as any)?.fields;
+        console.log(`  cap ${c.data?.objectId} -> dWallet ${f?.dwallet_id}`);
+      }
+      throw new Error(`No DWalletCap found for ${dwalletId}`);
     }
-    throw new Error(`No dWalletCap found for ${dwalletId}. Wrong Sui address?`);
+    capId = cap.data?.objectId;
   }
-  console.log(`Using dWalletCap: ${cap.id}`);
+  console.log(`Using dWalletCap: ${capId}`);
 
   // Test message - in production this would be a Zcash sighash
   const testMessage = new TextEncoder().encode("zcash-ika-sign-test-v1");
@@ -208,7 +219,7 @@ async function main() {
 
   // Approve the message (this is where Move policy would gate in production)
   const messageApproval = signIkaTx.approveMessage({
-    dWalletCap: cap.id,
+    dWalletCap: capId,
     curve: Curve.SECP256K1,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
     hashScheme: Hash.DoubleSHA256,
