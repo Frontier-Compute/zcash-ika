@@ -221,22 +221,94 @@ async function main() {
     throw new Error(`DKG failed: ${dkgResult.effects?.status?.error}`);
   }
 
-  // Find active dWallet
-  const dkgCreated = dkgResult.effects?.created || [];
-  let dwalletId = null;
-  let dWallet = null;
+  // Parse DKG events for dWallet ID and encrypted share ID
+  const dkgTxDetail = await suiClient.waitForTransaction({
+    digest: dkgResult.digest,
+    options: { showEvents: true },
+  });
 
-  for (const obj of dkgCreated) {
-    const id = (obj.reference as any)?.objectId;
-    if (!id) continue;
+  let dwalletId: string | null = null;
+  let dwalletCapId: string | null = null;
+  let encShareId: string | null = null;
+
+  for (const event of dkgTxDetail.events || []) {
+    if (event.type.includes("DWalletDKGRequestEvent")) {
+      const ed = (event as any).parsedJson?.event_data || (event as any).parsedJson;
+      dwalletId = ed?.dwallet_id || null;
+      dwalletCapId = ed?.dwallet_cap_id || null;
+    }
+    if (event.type.includes("EncryptedUserSecretKeyShareCreatedEvent")) {
+      const ed = (event as any).parsedJson?.event_data || (event as any).parsedJson;
+      encShareId = ed?.encrypted_user_secret_key_share_id || null;
+    }
+  }
+
+  // Find encrypted share from created objects if not in events
+  if (!encShareId) {
+    const dkgCreated = dkgResult.effects?.created || [];
+    for (const obj of dkgCreated) {
+      const id = (obj.reference as any)?.objectId;
+      if (!id || id === dwalletId || id === dwalletCapId) continue;
+      try {
+        const share = await ikaClient.getEncryptedUserSecretKeyShare(id);
+        if (share) { encShareId = id; break; }
+      } catch { continue; }
+    }
+  }
+
+  console.log(`dWallet: ${dwalletId}`);
+  console.log(`dWalletCap: ${dwalletCapId}`);
+  console.log(`Encrypted share: ${encShareId}`);
+
+  if (!dwalletId) throw new Error("DKG event did not contain dwallet_id");
+
+  // Wait for dWallet to reach AwaitingKeyHolderSignature state
+  console.log("Waiting for MPC to process DKG...");
+  let dWallet = null;
+  try {
+    dWallet = await ikaClient.getDWalletInParticularState(dwalletId, "AwaitingKeyHolderSignature", POLL_OPTS);
+    console.log("dWallet at AwaitingKeyHolderSignature");
+  } catch {
+    // Maybe already Active
     try {
-      const dw = await ikaClient.getDWalletInParticularState(id, "Active", POLL_OPTS);
-      if (dw) {
-        dwalletId = id;
-        dWallet = dw;
-        break;
-      }
-    } catch { continue; }
+      dWallet = await ikaClient.getDWalletInParticularState(dwalletId, "Active", { timeout: 10_000, interval: 2_000 });
+      console.log("dWallet already Active");
+    } catch {
+      throw new Error("dWallet stuck - not AwaitingKeyHolderSignature or Active within timeout");
+    }
+  }
+
+  // If AwaitingKeyHolderSignature, accept the encrypted share
+  const stateKey = Object.keys(dWallet.state || {})[0];
+  if (stateKey === "AwaitingKeyHolderSignature" && encShareId) {
+    console.log("\n--- Accepting encrypted share ---");
+    const pubOutput = dWallet.state.AwaitingKeyHolderSignature?.public_output;
+    const userOutputSig = await encKeys.getUserOutputSignature(dWallet, pubOutput);
+
+    const acceptTx = new Transaction();
+    coordinatorTransactions.acceptEncryptedUserShare(
+      ikaConf,
+      acceptTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
+      dwalletId,
+      encShareId,
+      userOutputSig,
+      acceptTx,
+    );
+
+    const acceptResult = await suiClient.signAndExecuteTransaction({
+      transaction: acceptTx,
+      signer: keypair,
+      options: { showEffects: true },
+    });
+    console.log(`Accept TX: ${acceptResult.digest}`);
+    if (acceptResult.effects?.status?.status !== "success") {
+      throw new Error(`Accept failed: ${acceptResult.effects?.status?.error}`);
+    }
+
+    // Now poll for Active
+    console.log("Waiting for dWallet to go Active...");
+    dWallet = await ikaClient.getDWalletInParticularState(dwalletId, "Active", POLL_OPTS);
+    console.log("dWallet Active!");
   }
 
   if (!dwalletId || !dWallet) throw new Error("DKG completed but no Active dWallet found");
