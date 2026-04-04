@@ -1,16 +1,17 @@
 /**
  * @frontiercompute/zcash-ika
  *
- * Zero-trust custody for Zcash and Bitcoin. Born shielded, stay shielded.
+ * Split-key custody for Zcash transparent, Bitcoin, and EVM chains.
  *
- * Two dWallets, one operator:
- * - Ed25519 dWallet -> Zcash Orchard (shielded ZEC)
- * - secp256k1 dWallet -> Bitcoin (BTC) + Zcash transparent (t-addr)
- *
- * Neither key ever exists whole. Both chains signed through Ika 2PC-MPC.
+ * One secp256k1 dWallet signs for all three chain families.
+ * Neither key half can sign alone. Policy enforced by Sui Move contract.
  * Every operation attested to Zcash via ZAP1.
  *
  * Built on Ika's 2PC-MPC network (Sui).
+ *
+ * NOTE: Zcash shielded (Orchard) uses RedPallas on the Pallas curve,
+ * which Ika does not currently support. Only transparent ZEC (secp256k1)
+ * is viable through this package today.
  */
 
 export {
@@ -33,7 +34,10 @@ export {
 } from "@ika.xyz/sdk";
 
 // Chain identifiers for wallet creation
-export type Chain = "zcash-shielded" | "zcash-transparent" | "bitcoin";
+// NOTE: "zcash-shielded" is aspirational. Orchard requires RedPallas (Pallas curve),
+// not Ed25519. The Ed25519 dWallet exists on Ika but cannot sign Orchard transactions.
+// Only "zcash-transparent" and "bitcoin" work today via secp256k1.
+export type Chain = "zcash-transparent" | "bitcoin" | "ethereum";
 
 export interface ZcashIkaConfig {
   /** Ika network: mainnet or testnet */
@@ -48,14 +52,12 @@ export interface ZcashIkaConfig {
   zap1ApiKey?: string;
 }
 
-/** Parameters for dWallet creation per chain */
+/** Parameters for dWallet creation per chain.
+ *
+ * All chains use secp256k1 - one dWallet signs for all of them.
+ * Zcash shielded (Orchard) requires RedPallas on the Pallas curve,
+ * which is not available in Ika's current MPC. Transparent ZEC works. */
 export const CHAIN_PARAMS = {
-  "zcash-shielded": {
-    curve: "ED25519" as const,
-    algorithm: "EdDSA" as const,
-    hash: "SHA512" as const,
-    description: "Zcash Orchard shielded pool (Ed25519/EdDSA)",
-  },
   "zcash-transparent": {
     curve: "SECP256K1" as const,
     algorithm: "ECDSASecp256k1" as const,
@@ -67,6 +69,12 @@ export const CHAIN_PARAMS = {
     algorithm: "ECDSASecp256k1" as const,
     hash: "DoubleSHA256" as const,
     description: "Bitcoin (secp256k1/ECDSA, DoubleSHA256)",
+  },
+  ethereum: {
+    curve: "SECP256K1" as const,
+    algorithm: "ECDSASecp256k1" as const,
+    hash: "KECCAK256" as const,
+    description: "Ethereum/EVM (secp256k1/ECDSA, KECCAK256)",
   },
 } as const;
 
@@ -84,11 +92,9 @@ export interface DWalletHandle {
 }
 
 export interface DualCustody {
-  /** Shielded ZEC wallet (Ed25519 dWallet -> Orchard address) */
-  shielded: DWalletHandle;
-  /** Bitcoin wallet (secp256k1 dWallet -> BTC address) */
-  bitcoin: DWalletHandle;
-  /** Operator ID (shared across both wallets) */
+  /** Zcash transparent + Bitcoin wallet (secp256k1 dWallet) */
+  primary: DWalletHandle;
+  /** Operator ID */
   operatorId: string;
 }
 
@@ -104,7 +110,7 @@ export interface SpendPolicy {
 }
 
 export interface SpendRequest {
-  /** Recipient address (Orchard UA, t-addr, or BTC address) */
+  /** Recipient address (t-addr, BTC address, or ETH address) */
   to: string;
   /** Amount in smallest unit (zatoshis or satoshis) */
   amount: number;
@@ -133,36 +139,29 @@ export interface SignRequest {
 }
 
 export interface SignResult {
-  /** DER-encoded signature (ECDSA) or raw Ed25519 signature */
+  /** DER-encoded ECDSA signature */
   signature: Uint8Array;
   /** Public key used */
   publicKey: Uint8Array;
 }
 
 /**
- * Create a dual-custody setup: one shielded ZEC wallet + one BTC wallet.
- * Same operator controls both via Ika split-key.
+ * Create a split-key custody wallet.
+ * One secp256k1 dWallet signs for Zcash transparent, Bitcoin, and EVM.
  *
- * Flow per wallet:
+ * Flow:
  * 1. Generate UserShareEncryptionKeys from operator seed
- * 2. Run DKG on Ika (2PC-MPC key generation)
- * 3. Extract public key, derive chain-specific address
+ * 2. Run DKG on Ika (2PC-MPC key generation, secp256k1)
+ * 3. Extract public key, derive t-addr + BTC address + ETH address
  * 4. Attest wallet creation via ZAP1
  */
 export async function createDualCustody(
   config: ZcashIkaConfig,
   operatorSeed: Uint8Array
 ): Promise<DualCustody> {
-  // Both wallets share one operator seed.
-  // Each gets its own dWallet with different curve params.
-  //
-  // Phase 1 (current): throw with setup instructions
-  // Phase 2: actual DKG on Ika testnet
-
   throw new Error(
     "createDualCustody requires Ika network access. " +
-      "Shielded: Ed25519/EdDSA/SHA512 dWallet -> Orchard address. " +
-      "Bitcoin: secp256k1/ECDSA/DoubleSHA256 dWallet -> BTC address. " +
+      "secp256k1/ECDSA/DoubleSHA256 dWallet -> ZEC t-addr + BTC + ETH. " +
       "npm install @ika.xyz/sdk @mysten/sui && configure Sui wallet. " +
       "See https://docs.ika.xyz for DKG walkthrough."
   );
@@ -246,24 +245,27 @@ export async function setPolicy(
 }
 
 /**
- * Spend from a shielded ZEC wallet.
+ * Spend from a Zcash transparent wallet.
  *
- * 1. Build Zcash Orchard transaction (zcash_primitives)
- * 2. Extract sighash
- * 3. Sign via Ika 2PC-MPC (Ed25519/EdDSA)
+ * 1. Build Zcash transparent transaction
+ * 2. Compute sighash (DoubleSHA256)
+ * 3. Sign via Ika 2PC-MPC (secp256k1/ECDSA)
  * 4. Attach signature to transaction
  * 5. Broadcast via Zebra sendrawtransaction
  * 6. Attest via ZAP1 as AGENT_ACTION
+ *
+ * NOTE: Zcash shielded (Orchard) requires RedPallas on the Pallas curve.
+ * Ika does not support Pallas. Only transparent ZEC works through this path.
  */
-export async function spendShielded(
+export async function spendTransparent(
   config: ZcashIkaConfig,
   walletId: string,
   operatorSeed: Uint8Array,
   request: SpendRequest
 ): Promise<SpendResult> {
   throw new Error(
-    "spendShielded requires active Ed25519 dWallet + Zebra node. " +
-      "Integration in progress - need Ed25519 -> Orchard spending key derivation bridge."
+    "spendTransparent requires active secp256k1 dWallet + Zebra node. " +
+      "secp256k1 dWallet created on Ika testnet. Signing pipeline in progress."
   );
 }
 
