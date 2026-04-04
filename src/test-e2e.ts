@@ -175,6 +175,18 @@ async function main() {
   // Low-level DKG call (keyspring pattern - bypass IkaTransaction wrapper)
   const { coordinatorTransactions } = await import("@ika.xyz/sdk");
 
+  // Register encryption key BEFORE DKG (creates dynamic field the DKG reads)
+  const encKeySig = await encKeys.getEncryptionKeySignature();
+  coordinatorTransactions.registerEncryptionKeyTx(
+    ikaConf,
+    dkgTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
+    0, // secp256k1
+    encKeys.encryptionKey,
+    encKeySig,
+    encKeys.getSigningPublicKeyBytes(),
+    dkgTx,
+  );
+
   const [dWalletCap] = coordinatorTransactions.requestDWalletDKG(
     ikaConf,
     dkgTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
