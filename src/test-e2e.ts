@@ -109,7 +109,21 @@ async function main() {
     cache: true,
     encryptionKeyOptions: { autoDetect: true },
   });
-  await ikaClient.initialize();
+
+  try {
+    await ikaClient.initialize();
+    console.log("Ika client initialized");
+  } catch (err: any) {
+    console.log("Ika init warning:", err.message?.slice(0, 200));
+  }
+
+  // Try to get encryption keys
+  try {
+    const allKeys = await ikaClient.getAllNetworkEncryptionKeys();
+    console.log(`Found ${allKeys?.length || 0} encryption keys`);
+  } catch (err: any) {
+    console.log("Encryption keys error:", err.message?.slice(0, 200));
+  }
 
   // Check balance
   const balance = await suiClient.getBalance({ owner: address });
@@ -153,38 +167,36 @@ async function main() {
   const dkgInput = await prepareDKGAsync(ikaClient, Curve.SECP256K1, encKeys, bytesToHash, address);
 
   const dkgTx = new Transaction();
-  const dkgIkaTx = new IkaTransaction({
-    ikaClient,
-    transaction: dkgTx,
-    userShareEncryptionKeys: encKeys,
-  });
 
-  const sessionId = dkgIkaTx.registerSessionIdentifier(bytesToHash);
   const networkEncKey = await ikaClient.getLatestNetworkEncryptionKey?.()
     || await (ikaClient as any).getConfiguredNetworkEncryptionKey?.();
+  const ikaConf = (ikaClient as any).ikaConfig;
 
-  // Coins: IKA for Ika fees, SUI for gas
-  const dkgIkaCoinObj = dkgTx.object(ikaCoinId);
-  const dkgIkaSplit = dkgTx.splitCoins(dkgIkaCoinObj, [50_000_000]);
-  const dkgSuiSplit = dkgTx.splitCoins(dkgTx.gas, [50_000_000]);
+  // Low-level DKG call (keyspring pattern - bypass IkaTransaction wrapper)
+  const { coordinatorTransactions } = await import("@ika.xyz/sdk");
 
-  // requestDWalletDKG returns (DWalletCap, Option<ID>)
-  // Both must be consumed: transfer cap, destroy_none the option
-  const dkgRet = await (dkgIkaTx as any).requestDWalletDKG({
-    dkgRequestInput: dkgInput,
-    sessionIdentifier: sessionId,
-    dwalletNetworkEncryptionKeyId: networkEncKey?.id,
-    curve: Curve.SECP256K1,
-    ikaCoin: dkgIkaSplit,
-    suiCoin: dkgSuiSplit,
-  });
-  // dkgRet is the moveCall result. Transfer DWalletCap[0], destroy Option<ID>[1]
-  dkgTx.transferObjects([dkgRet[0]], address);
-  dkgTx.moveCall({
-    target: "0x1::option::destroy_none",
-    typeArguments: ["0x2::object::ID"],
-    arguments: [dkgRet[1]],
-  });
+  const [dWalletCap] = coordinatorTransactions.requestDWalletDKG(
+    ikaConf,
+    dkgTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
+    networkEncKey?.id,
+    0, // secp256k1
+    dkgInput.userDKGMessage,
+    dkgInput.encryptedUserShareAndProof,
+    encKeys.getSuiAddress(),
+    dkgInput.userPublicOutput,
+    encKeys.getSigningPublicKeyBytes(),
+    coordinatorTransactions.registerSessionIdentifier(
+      ikaConf,
+      dkgTx.object(ikaConf.objects.ikaDWalletCoordinator.objectID),
+      bytesToHash,
+      dkgTx,
+    ),
+    null, // no signDuringDKG
+    dkgTx.object(ikaCoinId), // full IKA coin (not split)
+    dkgTx.gas, // SUI gas coin directly
+    dkgTx,
+  );
+  dkgTx.transferObjects([dWalletCap], address);
 
   const dkgResult = await suiClient.signAndExecuteTransaction({
     transaction: dkgTx,
