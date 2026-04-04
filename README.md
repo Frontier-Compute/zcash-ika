@@ -1,33 +1,44 @@
 # zcash-ika
 
-Zero-trust Zcash agent custody. Born shielded, stay shielded.
+Hold ZEC. Hold BTC. Neither key ever exists whole.
 
-The agent holds half a key. The operator holds the other half. Neither can sign alone. Every operation attested to Zcash via ZAP1.
+Split-key custody for Zcash and Bitcoin via [Ika's 2PC-MPC network](https://ika.xyz). Your phone holds half the key. The Ika network holds the other half. A compromised device gets half a key. Worthless.
 
-Built on [Ika's 2PC-MPC network](https://ika.xyz) for EdDSA signing. Policy enforced by Sui smart contracts. Transactions stay in the Orchard shielded pool from creation to spend.
+Works with any wallet that supports the protocol. Works for AI agents that need to spend but shouldn't be trusted with full keys. Works for anyone who wants real custody guarantees instead of "trust me" security.
+
+## What you get
+
+Two wallets under one operator:
+
+| Wallet | Chain | Curve | What it signs |
+|--------|-------|-------|---------------|
+| Shielded | Zcash Orchard | Ed25519/EdDSA | Private ZEC transactions |
+| Bitcoin | Bitcoin | secp256k1/ECDSA | BTC transactions |
+
+Both wallets share one operator identity. Both enforced by the same spending policy (Sui Move contract). Both attested on-chain via ZAP1.
 
 ## How it works
 
 ```
-Operator (phone/hardware wallet)
+Your phone / hardware wallet
   |
-  | user key share
+  | operator key share
   |
-Ika MPC Network (Sui)
+Ika MPC Network (2PC-MPC on Sui)
   |
   | network key share (distributed across nodes)
   |
-  +-- Spending Policy (Move contract on Sui)
+  +-- Spending Policy (Move contract)
   |     max per tx, daily cap, approved recipients
   |
-  +-- Sign Zcash transaction (2PC-MPC, EdDSA)
-  |     both shares cooperate, full key never exists
+  +-- Sign Zcash tx (Ed25519/EdDSA) -> shielded spend
+  +-- Sign Bitcoin tx (secp256k1/ECDSA) -> BTC spend
   |
 ZAP1 Attestation (Zcash mainnet)
   |
-  +-- Every spend attested as AGENT_ACTION
-  +-- Policy violations on-chain as POLICY_VIOLATION
-  +-- Bond deposits as BOND_DEPOSIT
+  +-- every spend on-chain as AGENT_ACTION
+  +-- policy violations recorded
+  +-- full audit trail, verifiable by anyone
 ```
 
 ## Install
@@ -39,59 +50,95 @@ npm install @frontiercompute/zcash-ika
 ## Usage
 
 ```typescript
-import { createWallet, spend, setPolicy, getHistory } from "@frontiercompute/zcash-ika";
+import {
+  createDualCustody,
+  spendShielded,
+  spendBitcoin,
+  setPolicy,
+  getHistory,
+  checkCompliance,
+  CHAIN_PARAMS,
+} from "@frontiercompute/zcash-ika";
 
-// Create a zero-trust shielded wallet
-const wallet = await createWallet({
-  network: "testnet",
+const config = {
+  network: "mainnet",
   zebraRpcUrl: "http://127.0.0.1:8232",
   zap1ApiUrl: "https://pay.frontiercompute.io",
   zap1ApiKey: "your-key",
-}, operatorSeed);
+};
 
-// Set spending policy (enforced by Sui contract)
-await setPolicy(config, wallet.id, {
-  maxPerTx: 100_000,      // 0.001 ZEC max per transaction
-  maxDaily: 1_000_000,    // 0.01 ZEC daily cap
-  allowedRecipients: [],  // any recipient
-  approvalThreshold: 500_000, // require operator approval above 0.005 ZEC
+// Create dual custody - one shielded ZEC wallet + one BTC wallet
+const custody = await createDualCustody(config, operatorSeed);
+// custody.shielded.address -> Orchard UA
+// custody.bitcoin.address -> BTC address
+// Same operator, same policy, both split-key
+
+// Set spending policy (enforced by Sui contract, not by the agent)
+await setPolicy(config, custody.shielded.id, {
+  maxPerTx: 100_000,       // 0.001 ZEC max per tx
+  maxDaily: 1_000_000,     // 0.01 ZEC daily cap
+  allowedRecipients: [],   // any recipient
+  approvalThreshold: 500_000,
 });
 
-// Spend (agent requests, both key shares cooperate)
-const result = await spend(config, wallet.id, operatorSeed, {
+// Shielded ZEC spend - agent requests, both key shares cooperate
+const zecResult = await spendShielded(config, custody.shielded.id, operatorSeed, {
   to: "u1abc...",
-  amountZat: 50_000,
+  amount: 50_000,
   memo: "payment for API access",
 });
 
-// Verify on-chain
-console.log(result.verifyUrl);
+// Bitcoin spend - same MPC flow, different curve
+const btcResult = await spendBitcoin(config, custody.bitcoin.id, operatorSeed, {
+  to: "bc1q...",
+  amount: 100_000,
+});
 
-// Check compliance history
-const history = await getHistory(config, wallet.id);
-const compliance = await checkCompliance(config, wallet.id);
+// Check compliance history (works now against live ZAP1 API)
+const history = await getHistory(config, custody.shielded.id);
+const compliance = await checkCompliance(config, custody.shielded.id);
 ```
+
+## Signing parameters
+
+| Chain | Curve | Algorithm | Hash | Use case |
+|-------|-------|-----------|------|----------|
+| Zcash Orchard | ED25519 | EdDSA | SHA512 | Shielded ZEC |
+| Zcash transparent | SECP256K1 | ECDSASecp256k1 | DoubleSHA256 | t-addr ZEC |
+| Bitcoin | SECP256K1 | ECDSASecp256k1 | DoubleSHA256 | BTC |
+
+Bitcoin and Zcash transparent share the same curve and hash. One secp256k1 dWallet can sign for both chains (different address derivation).
 
 ## Why this matters
 
-Every agent wallet today is trust-based. The agent has the full key. If it goes rogue, it drains the wallet. Rate limits and kill switches are software controls that software can bypass.
+Every wallet today is trust-based. The app has the full key. If it gets hacked, funds are gone. Hardware wallets improve this but still hold a complete key in one place.
 
-This is different. The private key is never whole. The Ika MPC network holds one share, the operator holds the other. A compromised agent gets half a key. Worthless. A compromised MPC node gets the other half. Also worthless.
+This is structurally different. The private key is never whole. Not on your phone, not on the Ika network, not anywhere. Both halves must cooperate to sign. The spending policy lives in a Sui smart contract that neither party can unilaterally modify.
 
-Spending policy lives in a Sui smart contract, not in the agent's code. The agent can't modify its own limits because the contract holds the signing capability.
+For AI agents, this is the difference between "the agent promises not to steal" and "the agent mathematically cannot steal."
 
 ## Stack
 
-- [Ika](https://ika.xyz) - 2PC-MPC threshold signing on Sui
-- [ZAP1](https://github.com/Frontier-Compute/zap1) - on-chain attestation protocol
+- [Ika](https://ika.xyz) - 2PC-MPC threshold signing on Sui (mainnet live)
+- [ZAP1](https://pay.frontiercompute.io) - on-chain attestation protocol
 - [Zebra](https://github.com/ZcashFoundation/zebra) - Zcash node
-- [zcash_primitives](https://crates.io/crates/zcash_primitives) - Orchard transaction building
+- Zcash Orchard pool - shielded transactions
+- Bitcoin - you know what Bitcoin is
 
 ## Status
 
-Interface published. Core signing integration in progress. Testnet DKG + signing demo coming next.
+Interface published. Ika SDK integrated. DKG + signing flow documented.
 
-The `getHistory` and `checkCompliance` functions work against the live ZAP1 API today. Wallet creation and spending require Ika testnet access (EdDSA went live December 2025).
+What works today:
+- `getHistory()` and `checkCompliance()` - live against ZAP1 API
+- All Ika SDK primitives re-exported and typed
+- Chain parameter configs for all three signing modes
+
+What's next:
+- Testnet DKG ceremony (create actual dWallets)
+- Ed25519 -> Orchard spending key derivation bridge
+- Sign a real Zcash sighash through the MPC
+- Bitcoin transaction signing demo
 
 ## License
 
