@@ -61,6 +61,8 @@ export interface ZcashIkaConfig {
   suiRpcUrl?: string;
   /** Sui private key (base64 encoded, suiprivkey1...) */
   suiPrivateKey: string;
+  /** IKA coin object ID (required for Ika transactions, separate from SUI gas) */
+  ikaCoinId?: string;
   /** Zebra node RPC for broadcasting Zcash txs */
   zebraRpcUrl?: string;
   /** ZAP1 API for attestation */
@@ -68,6 +70,8 @@ export interface ZcashIkaConfig {
   /** ZAP1 API key for write operations */
   zap1ApiKey?: string;
 }
+
+const IKA_COIN_TYPE = "0x1f26bb2f711ff82dcda4d02c77d5123089cb7f8418751474b9fb744ce031526a::ika::IKA";
 
 /** Parameters for dWallet creation per chain.
  *
@@ -212,6 +216,28 @@ async function initClients(config: ZcashIkaConfig) {
 }
 
 /**
+ * Find the IKA coin object ID for an address.
+ * IKA is a separate token from SUI - needed for Ika transaction fees.
+ */
+async function findIkaCoin(rpcUrl: string, address: string): Promise<string> {
+  const resp = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1,
+      method: "suix_getCoins",
+      params: [address, IKA_COIN_TYPE, null, 5],
+    }),
+  });
+  const data = (await resp.json()) as any;
+  const coins = data.result?.data || [];
+  if (coins.length === 0) {
+    throw new Error("No IKA tokens found. Get them from https://faucet.ika.xyz");
+  }
+  return coins[0].coinObjectId;
+}
+
+/**
  * Create a split-key custody wallet.
  * One secp256k1 dWallet signs for Zcash transparent, Bitcoin, and EVM.
  *
@@ -274,14 +300,26 @@ export async function createWallet(
   const networkEncKey = await (ikaClient as any).getLatestNetworkEncryptionKey?.()
     || await (ikaClient as any).getConfiguredNetworkEncryptionKey?.();
 
-  await (ikaTx as any).requestDWalletDKG({
+  // IKA coin (separate token type) required for Ika fees
+  const rpcUrl = config.suiRpcUrl || (
+    config.network === "testnet"
+      ? "https://sui-testnet-rpc.publicnode.com"
+      : "https://sui-mainnet-rpc.publicnode.com"
+  );
+  const ikaCoinId = config.ikaCoinId || await findIkaCoin(rpcUrl, address);
+  const ikaCoinObj = tx.object(ikaCoinId);
+
+  const dkgReturn = await (ikaTx as any).requestDWalletDKG({
     dkgRequestInput: dkgInput,
     sessionIdentifier: sessionId,
     dwalletNetworkEncryptionKeyId: networkEncKey?.id,
     curve: Curve.SECP256K1,
-    ikaCoin: tx.splitCoins(tx.gas, [50_000_000]),
+    ikaCoin: tx.splitCoins(ikaCoinObj, [50_000_000]),
     suiCoin: tx.splitCoins(tx.gas, [50_000_000]),
   });
+  if (dkgReturn) {
+    tx.transferObjects([dkgReturn], address);
+  }
 
   const result = await suiClient.signAndExecuteTransaction({
     transaction: tx,
@@ -374,6 +412,14 @@ export async function sign(
     capId = cap.id;
   }
 
+  // Find IKA coin for fees
+  const rpcUrl = config.suiRpcUrl || (
+    config.network === "testnet"
+      ? "https://sui-testnet-rpc.publicnode.com"
+      : "https://sui-mainnet-rpc.publicnode.com"
+  );
+  const ikaCoinId = config.ikaCoinId || await findIkaCoin(rpcUrl, address);
+
   // TX 1: Request presign
   const presignTx = new Transaction();
   const presignIkaTx = new IkaTransaction({
@@ -382,10 +428,11 @@ export async function sign(
     userShareEncryptionKeys: encKeys,
   });
 
+  const presignIkaCoin = presignTx.object(ikaCoinId);
   presignIkaTx.requestPresign({
     dWallet,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
+    ikaCoin: presignTx.splitCoins(presignIkaCoin, [50_000_000]),
     suiCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
   });
 
@@ -449,7 +496,7 @@ export async function sign(
     presign: completedPresign,
     message: request.messageHash,
     signatureScheme: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
+    ikaCoin: signTx.splitCoins(signTx.object(ikaCoinId), [50_000_000]),
     suiCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
   });
 

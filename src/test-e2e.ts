@@ -26,6 +26,8 @@ import { createHash } from "crypto";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+
+const IKA_COIN_TYPE = "0x1f26bb2f711ff82dcda4d02c77d5123089cb7f8418751474b9fb744ce031526a::ika::IKA";
 import {
   IkaClient,
   IkaTransaction,
@@ -113,10 +115,30 @@ async function main() {
   const balance = await suiClient.getBalance({ owner: address });
   const suiBalance = Number(balance.totalBalance) / 1e9;
   console.log(`SUI balance: ${suiBalance} SUI`);
-  if (suiBalance < 0.5) {
-    console.log("Need ~0.5 SUI for gas (DKG + presign + sign)");
+  if (suiBalance < 0.1) {
+    console.log("Need at least 0.1 SUI for gas");
     return;
   }
+
+  // Find IKA coin (needed for Ika gas, separate from SUI gas)
+  const ikaCoinsResp = await fetch("https://sui-testnet-rpc.publicnode.com", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1,
+      method: "suix_getCoins",
+      params: [address, IKA_COIN_TYPE, null, 5],
+    }),
+  });
+  const ikaCoinsData = (await ikaCoinsResp.json()) as any;
+  const ikaCoins = ikaCoinsData.result?.data || [];
+  if (ikaCoins.length === 0) {
+    console.log("No IKA tokens found. Get them from https://faucet.ika.xyz");
+    return;
+  }
+  const ikaCoinId = ikaCoins[0].coinObjectId;
+  const ikaBalance = Number(ikaCoins[0].balance) / 1e9;
+  console.log(`IKA coin: ${ikaCoinId} (${ikaBalance} IKA)`);
 
   // Generate encryption keys
   const seed = new Uint8Array(32);
@@ -141,13 +163,27 @@ async function main() {
   const networkEncKey = await ikaClient.getLatestNetworkEncryptionKey?.()
     || await (ikaClient as any).getConfiguredNetworkEncryptionKey?.();
 
-  await (dkgIkaTx as any).requestDWalletDKG({
+  // Coins: IKA for Ika fees, SUI for gas
+  const dkgIkaCoinObj = dkgTx.object(ikaCoinId);
+  const dkgIkaSplit = dkgTx.splitCoins(dkgIkaCoinObj, [50_000_000]);
+  const dkgSuiSplit = dkgTx.splitCoins(dkgTx.gas, [50_000_000]);
+
+  // requestDWalletDKG returns (DWalletCap, Option<ID>)
+  // Both must be consumed: transfer cap, destroy_none the option
+  const dkgRet = await (dkgIkaTx as any).requestDWalletDKG({
     dkgRequestInput: dkgInput,
     sessionIdentifier: sessionId,
     dwalletNetworkEncryptionKeyId: networkEncKey?.id,
     curve: Curve.SECP256K1,
-    ikaCoin: dkgTx.splitCoins(dkgTx.gas, [50_000_000]),
-    suiCoin: dkgTx.splitCoins(dkgTx.gas, [50_000_000]),
+    ikaCoin: dkgIkaSplit,
+    suiCoin: dkgSuiSplit,
+  });
+  // dkgRet is the moveCall result. Transfer DWalletCap[0], destroy Option<ID>[1]
+  dkgTx.transferObjects([dkgRet[0]], address);
+  dkgTx.moveCall({
+    target: "0x1::option::destroy_none",
+    typeArguments: ["0x2::object::ID"],
+    arguments: [dkgRet[1]],
   });
 
   const dkgResult = await suiClient.signAndExecuteTransaction({
@@ -212,10 +248,11 @@ async function main() {
     userShareEncryptionKeys: encKeys,
   });
 
+  const presignIkaCoinObj = presignTx.object(ikaCoinId);
   presignIkaTx.requestPresign({
     dWallet,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
+    ikaCoin: presignTx.splitCoins(presignIkaCoinObj, [50_000_000]),
     suiCoin: presignTx.splitCoins(presignTx.gas, [50_000_000]),
   });
 
@@ -267,6 +304,7 @@ async function main() {
     message: sighash,
   });
 
+  const signIkaCoinObj = signTx.object(ikaCoinId);
   await signIkaTx.requestSign({
     dWallet,
     messageApproval,
@@ -275,7 +313,7 @@ async function main() {
     presign: completedPresign,
     message: sighash,
     signatureScheme: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
+    ikaCoin: signTx.splitCoins(signIkaCoinObj, [50_000_000]),
     suiCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
   });
 

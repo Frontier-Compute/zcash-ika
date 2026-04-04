@@ -118,15 +118,36 @@ async function main() {
   const networkEncKey = await ikaClient.getLatestNetworkEncryptionKey?.()
     || await (ikaClient as any).getConfiguredNetworkEncryptionKey?.();
 
-  // Submit DKG request
-  const dkgResult = await (ikaTx as any).requestDWalletDKG({
+  // Find IKA coins (separate token type from SUI)
+  const IKA_COIN_TYPE = "0x1f26bb2f711ff82dcda4d02c77d5123089cb7f8418751474b9fb744ce031526a::ika::IKA";
+  const ikaResp = await fetch("https://sui-testnet-rpc.publicnode.com", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "suix_getCoins", params: [address, IKA_COIN_TYPE, null, 5] }),
+  });
+  const ikaData = (await ikaResp.json()) as any;
+  const ikaCoins = ikaData.result?.data || [];
+  if (ikaCoins.length === 0) {
+    console.log("No IKA tokens. Get them from https://faucet.ika.xyz");
+    return;
+  }
+  const ikaCoinId = ikaCoins[0].coinObjectId;
+  console.log(`IKA coin: ${ikaCoinId} (${Number(ikaCoins[0].balance) / 1e9} IKA)`);
+
+  // Submit DKG request (ikaCoin = IKA token, suiCoin = SUI gas)
+  const ikaCoinObj = tx.object(ikaCoinId);
+  const dkgReturn = await (ikaTx as any).requestDWalletDKG({
     dkgRequestInput: dkgInput,
     sessionIdentifier: sessionId,
     dwalletNetworkEncryptionKeyId: networkEncKey?.id,
     curve: Curve.SECP256K1,
-    ikaCoin: tx.splitCoins(tx.gas, [50_000_000]),
+    ikaCoin: tx.splitCoins(ikaCoinObj, [50_000_000]),
     suiCoin: tx.splitCoins(tx.gas, [50_000_000]),
   });
+  // Transfer DWalletCap to ourselves
+  if (dkgReturn) {
+    tx.transferObjects([dkgReturn], address);
+  }
 
   console.log("Submitting DKG to Ika network...");
   const result = await suiClient.signAndExecuteTransaction({
