@@ -161,8 +161,10 @@ async function main() {
   const presignIkaCoin = presignTx.object(ikaCoinId);
   const presignSuiCoin = presignTx.splitCoins(presignTx.gas, [50_000_000]);
 
-  const unverifiedPresignCap = presignIkaTx.requestPresign({
-    dWallet,
+  // Must use globalPresign for DKG-created dWallets (abort code 31 = EOnlyGlobalPresignAllowed)
+  const unverifiedPresignCap = presignIkaTx.requestGlobalPresign({
+    dwalletNetworkEncryptionKeyId: dWallet.dwallet_network_encryption_key_id,
+    curve: Curve.SECP256K1,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
     ikaCoin: presignIkaCoin,
     suiCoin: presignSuiCoin,
