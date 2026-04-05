@@ -810,9 +810,9 @@ export interface PolicyState {
   frozen: boolean;
 }
 
-// Published package ID - set after sui client publish
-// Override via POLICY_PACKAGE_ID env var or pass directly
-const DEFAULT_POLICY_PACKAGE_ID = "0x0";
+// Sui testnet deployment (zap1_policy package)
+// Override via POLICY_PACKAGE_ID env var for mainnet or redeployments
+const DEFAULT_POLICY_PACKAGE_ID = "0xb0468033d854e95ad89de4b6fec8f6d8e8187778c9d8337a6aa30a5c24775a77";
 
 function getPolicyPackageId(): string {
   return process.env.POLICY_PACKAGE_ID || DEFAULT_POLICY_PACKAGE_ID;
@@ -829,13 +829,6 @@ export async function setPolicy(
   policy: SpendPolicy
 ): Promise<PolicyResult> {
   const packageId = getPolicyPackageId();
-  if (packageId === "0x0") {
-    throw new Error(
-      "Policy Move module not deployed. Set POLICY_PACKAGE_ID env var " +
-      "after running: sui client publish --path move/"
-    );
-  }
-
   const { suiClient, keypair } = await initClients(config);
 
   const tx = new Transaction();
@@ -975,6 +968,304 @@ export async function checkPolicy(
   }
 
   return { ...state, allowed };
+}
+
+// Custody module interfaces
+
+export interface VaultResult {
+  /** CustodyVault shared object ID on Sui */
+  vaultId: string;
+  /** AdminCap object ID (vault creator holds this) */
+  adminCapId: string;
+  /** Sui transaction digest */
+  txDigest: string;
+}
+
+export interface AgentResult {
+  /** AgentCap object ID (issued to the registered agent) */
+  agentCapId: string;
+  /** Sui transaction digest */
+  txDigest: string;
+}
+
+export interface VaultState {
+  vaultId: string;
+  dwalletId: string;
+  maxPerTx: number;
+  maxDaily: number;
+  dailySpent: number;
+  totalSpent: number;
+  totalTxCount: number;
+  agentCount: number;
+  frozen: boolean;
+}
+
+/**
+ * Create a CustodyVault for a dWallet.
+ * The vault enforces spend policy on-chain and tracks agent access.
+ * Returns the vault ID and AdminCap (transferred to caller).
+ */
+export async function createVault(
+  config: ZcashIkaConfig,
+  dwalletId: string,
+  maxPerTx: number,
+  maxDaily: number,
+): Promise<VaultResult> {
+  const packageId = getPolicyPackageId();
+  const { suiClient, keypair } = await initClients(config);
+  const sender = keypair.getPublicKey().toSuiAddress();
+
+  const tx = new Transaction();
+
+  const adminCap = tx.moveCall({
+    target: `${packageId}::custody::create_vault`,
+    arguments: [
+      tx.pure.address(dwalletId),
+      tx.pure.u64(maxPerTx),
+      tx.pure.u64(maxDaily),
+      tx.object("0x6"), // Clock
+    ],
+  });
+
+  tx.transferObjects([adminCap], sender);
+
+  const result = await suiClient.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true, showObjectChanges: true },
+  });
+
+  if (result.effects?.status?.status !== "success") {
+    throw new Error(`createVault TX failed: ${result.effects?.status?.error}`);
+  }
+
+  let vaultId = "";
+  let adminCapId = "";
+
+  const changes = (result as any).objectChanges || [];
+  for (const change of changes) {
+    if (change.type !== "created") continue;
+    const objType = change.objectType || "";
+    if (objType.includes("::custody::CustodyVault")) {
+      vaultId = change.objectId;
+    } else if (objType.includes("::custody::AdminCap")) {
+      adminCapId = change.objectId;
+    }
+  }
+
+  if (!vaultId || !adminCapId) {
+    const created = result.effects?.created || [];
+    for (const obj of created) {
+      const id = (obj as any).reference?.objectId || (obj as any).objectId;
+      if (id && !vaultId) vaultId = id;
+      else if (id && !adminCapId) adminCapId = id;
+    }
+  }
+
+  return { vaultId, adminCapId, txDigest: result.digest };
+}
+
+/**
+ * Register an agent on a CustodyVault.
+ * Only the admin (holder of AdminCap) can do this.
+ * Returns the AgentCap which should be transferred to the agent.
+ */
+export async function registerAgent(
+  config: ZcashIkaConfig,
+  vaultId: string,
+  adminCapId: string,
+  agentAddress: string,
+  agentName: string,
+): Promise<AgentResult> {
+  const packageId = getPolicyPackageId();
+  const { suiClient, keypair } = await initClients(config);
+  const sender = keypair.getPublicKey().toSuiAddress();
+
+  const tx = new Transaction();
+  const nameBytes = Array.from(new TextEncoder().encode(agentName));
+
+  const agentCap = tx.moveCall({
+    target: `${packageId}::custody::register_agent`,
+    arguments: [
+      tx.object(vaultId),
+      tx.object(adminCapId),
+      tx.pure.address(agentAddress),
+      tx.pure.vector("u8", nameBytes),
+      tx.object("0x6"), // Clock
+    ],
+  });
+
+  // Transfer AgentCap to the agent address
+  tx.transferObjects([agentCap], agentAddress);
+
+  const result = await suiClient.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true, showObjectChanges: true },
+  });
+
+  if (result.effects?.status?.status !== "success") {
+    throw new Error(`registerAgent TX failed: ${result.effects?.status?.error}`);
+  }
+
+  let agentCapId = "";
+  const changes = (result as any).objectChanges || [];
+  for (const change of changes) {
+    if (change.type !== "created") continue;
+    const objType = change.objectType || "";
+    if (objType.includes("::custody::AgentCap")) {
+      agentCapId = change.objectId;
+    }
+  }
+
+  return { agentCapId, txDigest: result.digest };
+}
+
+/**
+ * Request a spend through the CustodyVault.
+ * The Move contract checks all policy constraints on-chain.
+ * Aborts if the spend violates any limit.
+ */
+export async function requestSpend(
+  config: ZcashIkaConfig,
+  vaultId: string,
+  agentCapId: string,
+  amount: number,
+  recipient: string,
+  chain: string,
+): Promise<{ approved: boolean; txDigest: string }> {
+  const packageId = getPolicyPackageId();
+  const { suiClient, keypair } = await initClients(config);
+
+  const tx = new Transaction();
+  const recipientBytes = Array.from(new TextEncoder().encode(recipient));
+  const chainBytes = Array.from(new TextEncoder().encode(chain));
+
+  tx.moveCall({
+    target: `${packageId}::custody::request_spend_entry`,
+    arguments: [
+      tx.object(vaultId),
+      tx.object(agentCapId),
+      tx.pure.u64(amount),
+      tx.pure.vector("u8", recipientBytes),
+      tx.pure.vector("u8", chainBytes),
+      tx.object("0x6"), // Clock
+    ],
+  });
+
+  const result = await suiClient.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true },
+  });
+
+  if (result.effects?.status?.status !== "success") {
+    return { approved: false, txDigest: result.digest };
+  }
+
+  return { approved: true, txDigest: result.digest };
+}
+
+/**
+ * Read the on-chain state of a CustodyVault.
+ */
+export async function getVaultState(
+  config: ZcashIkaConfig,
+  vaultId: string,
+): Promise<VaultState> {
+  const { suiClient } = await initClients(config);
+
+  const obj = await suiClient.getObject({
+    id: vaultId,
+    options: { showContent: true },
+  });
+
+  const content = (obj.data?.content as any);
+  if (!content || content.dataType !== "moveObject") {
+    throw new Error(`Vault object ${vaultId} not found or not a Move object`);
+  }
+
+  const fields = content.fields;
+
+  return {
+    vaultId,
+    dwalletId: fields.dwallet_id,
+    maxPerTx: Number(fields.max_per_tx),
+    maxDaily: Number(fields.max_daily),
+    dailySpent: Number(fields.daily_spent),
+    totalSpent: Number(fields.total_spent),
+    totalTxCount: Number(fields.total_tx_count),
+    agentCount: Number(fields.agent_count),
+    frozen: fields.frozen,
+  };
+}
+
+/**
+ * Freeze a CustodyVault. All spend requests will be rejected until unfrozen.
+ */
+export async function freezeVault(
+  config: ZcashIkaConfig,
+  vaultId: string,
+  adminCapId: string,
+): Promise<string> {
+  const packageId = getPolicyPackageId();
+  const { suiClient, keypair } = await initClients(config);
+
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${packageId}::custody::freeze_vault`,
+    arguments: [
+      tx.object(vaultId),
+      tx.object(adminCapId),
+      tx.object("0x6"), // Clock
+    ],
+  });
+
+  const result = await suiClient.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true },
+  });
+
+  if (result.effects?.status?.status !== "success") {
+    throw new Error(`freezeVault TX failed: ${result.effects?.status?.error}`);
+  }
+
+  return result.digest;
+}
+
+/**
+ * Unfreeze a CustodyVault. Resumes normal spend processing.
+ */
+export async function unfreezeVault(
+  config: ZcashIkaConfig,
+  vaultId: string,
+  adminCapId: string,
+): Promise<string> {
+  const packageId = getPolicyPackageId();
+  const { suiClient, keypair } = await initClients(config);
+
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${packageId}::custody::unfreeze_vault`,
+    arguments: [
+      tx.object(vaultId),
+      tx.object(adminCapId),
+      tx.object("0x6"), // Clock
+    ],
+  });
+
+  const result = await suiClient.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true },
+  });
+
+  if (result.effects?.status?.status !== "success") {
+    throw new Error(`unfreezeVault TX failed: ${result.effects?.status?.error}`);
+  }
+
+  return result.digest;
 }
 
 /**
