@@ -209,6 +209,59 @@ export function deriveZcashAddress(
   return base58Encode(full);
 }
 
+// Bitcoin P2PKH version bytes (1 byte each)
+const BITCOIN_VERSION_BYTE = {
+  mainnet: 0x00, // 1...
+  testnet: 0x6f, // m... or n...
+} as const;
+
+/**
+ * Derive a Bitcoin P2PKH address from a compressed secp256k1 public key.
+ *
+ * Same as Zcash transparent but with a 1-byte version prefix:
+ *   mainnet 0x00 (1...), testnet 0x6f (m.../n...)
+ *
+ * Steps:
+ *   1. SHA256(pubkey) then RIPEMD160 = 20-byte hash
+ *   2. Prepend 1-byte version
+ *   3. Double-SHA256 checksum (first 4 bytes)
+ *   4. Base58 encode (version + hash + checksum)
+ */
+export function deriveBitcoinAddress(
+  publicKey: Uint8Array,
+  network: "mainnet" | "testnet" = "mainnet"
+): string {
+  if (publicKey.length !== 33) {
+    throw new Error(
+      `Expected 33-byte compressed secp256k1 pubkey, got ${publicKey.length} bytes`
+    );
+  }
+  const prefix = publicKey[0];
+  if (prefix !== 0x02 && prefix !== 0x03) {
+    throw new Error(
+      `Invalid compressed pubkey prefix 0x${prefix.toString(16)}, expected 0x02 or 0x03`
+    );
+  }
+
+  const pubkeyHash = hash160(publicKey); // 20 bytes
+  const version = BITCOIN_VERSION_BYTE[network];
+
+  // version (1) + hash160 (20) = 21 bytes
+  const payload = new Uint8Array(21);
+  payload[0] = version;
+  payload.set(pubkeyHash, 1);
+
+  // checksum: first 4 bytes of SHA256(SHA256(payload))
+  const checksum = sha256(sha256(payload)).subarray(0, 4);
+
+  // final: payload (21) + checksum (4) = 25 bytes
+  const full = new Uint8Array(25);
+  full.set(payload, 0);
+  full.set(checksum, 21);
+
+  return base58Encode(full);
+}
+
 export interface DWalletHandle {
   /** dWallet object ID on Sui */
   id: string;
@@ -475,6 +528,8 @@ export async function createWallet(
   let derivedAddress = "";
   if (pubkey && pubkey.length === 33 && chain === "zcash-transparent") {
     derivedAddress = deriveZcashAddress(pubkey, config.network);
+  } else if (pubkey && pubkey.length === 33 && chain === "bitcoin") {
+    derivedAddress = deriveBitcoinAddress(pubkey, config.network);
   }
 
   return {
