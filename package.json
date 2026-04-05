@@ -1,6 +1,6 @@
 {
   "name": "@frontiercompute/zcash-ika",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Split-key Zcash custody via Ika dWallet. secp256k1 MPC for transparent, hybrid model for shielded.",
   "type": "module",
   "main": "dist/index.js",
