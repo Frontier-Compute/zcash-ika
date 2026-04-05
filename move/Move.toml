@@ -1,0 +1,9 @@
+[package]
+name = "zap1_policy"
+edition = "2024"
+
+[dependencies]
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "mainnet-v1.41.1" }
+
+[addresses]
+zap1_policy = "0x0"

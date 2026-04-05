@@ -1,7 +1,7 @@
 {
   "name": "@frontiercompute/zcash-ika",
-  "version": "0.2.0",
-  "description": "Split-key Zcash custody via Ika dWallet. secp256k1 MPC for transparent, hybrid model for shielded.",
+  "version": "0.3.0",
+  "description": "Split-key custody for Zcash, Bitcoin, and EVM. 2PC-MPC signing, on-chain spend policy, transparent TX builder, ZAP1 attestation.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -11,18 +11,38 @@
   },
   "dependencies": {
     "@ika.xyz/sdk": "^0.3.1",
-    "@mysten/sui": "^2.5.0"
+    "@mysten/sui": "^2.5.0",
+    "blakejs": "^1.2.1"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
     "typescript": "^5.4.0"
   },
-  "files": ["dist/index.js", "dist/index.d.ts", "dist/hybrid.js", "dist/hybrid.d.ts"],
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/tx-builder.js",
+    "dist/tx-builder.d.ts",
+    "dist/hybrid.js",
+    "dist/hybrid.d.ts"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/Frontier-Compute/zcash-ika.git"
   },
   "author": "zk_nd3r <zk_nd3r@frontiercompute.io>",
-  "keywords": ["zcash", "ika", "dwallet", "mpc", "custody", "bitcoin", "split-key"],
+  "keywords": [
+    "zcash",
+    "ika",
+    "dwallet",
+    "mpc",
+    "custody",
+    "bitcoin",
+    "split-key",
+    "policy",
+    "sui-move",
+    "transparent-tx",
+    "attestation"
+  ],
   "license": "MIT"
 }

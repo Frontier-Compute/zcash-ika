@@ -52,6 +52,27 @@ import { Transaction } from "@mysten/sui/transactions";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
 import { createHash } from "node:crypto";
 
+import {
+  fetchUTXOs,
+  selectUTXOs,
+  buildUnsignedTx,
+  attachSignatures,
+  broadcastTx,
+  estimateFee,
+  BRANCH_ID,
+} from "./tx-builder.js";
+
+export {
+  fetchUTXOs,
+  selectUTXOs,
+  buildUnsignedTx,
+  attachSignatures,
+  broadcastTx,
+  estimateFee,
+  BRANCH_ID,
+} from "./tx-builder.js";
+export type { UTXO } from "./tx-builder.js";
+
 // Chain identifiers for wallet creation
 export type Chain = "zcash-transparent" | "bitcoin" | "ethereum";
 
@@ -690,32 +711,204 @@ export async function sign(
   };
 }
 
+export interface PolicyResult {
+  /** SpendPolicy shared object ID on Sui */
+  policyId: string;
+  /** PolicyCap object ID (owner holds this to manage policy) */
+  capId: string;
+  /** Sui transaction digest */
+  txDigest: string;
+}
+
+export interface PolicyState {
+  policyId: string;
+  dwalletId: string;
+  owner: string;
+  maxPerTx: number;
+  maxDaily: number;
+  dailySpent: number;
+  windowStart: number;
+  allowedRecipients: string[];
+  frozen: boolean;
+}
+
+// Published package ID - set after sui client publish
+// Override via POLICY_PACKAGE_ID env var or pass directly
+const DEFAULT_POLICY_PACKAGE_ID = "0x0";
+
+function getPolicyPackageId(): string {
+  return process.env.POLICY_PACKAGE_ID || DEFAULT_POLICY_PACKAGE_ID;
+}
+
 /**
- * Set spending policy on the dWallet.
- * Policy enforced at Sui Move contract level.
- * The agent cannot bypass it - the contract holds the DWalletCap.
+ * Set spending policy on a dWallet.
+ * Creates a SpendPolicy shared object and PolicyCap on Sui.
+ * The PolicyCap is transferred to the caller.
  */
 export async function setPolicy(
-  _config: ZcashIkaConfig,
-  _walletId: string,
-  _policy: SpendPolicy
-): Promise<string> {
-  throw new Error(
-    "setPolicy requires a deployed Move module on Sui. " +
-      "The module gates approve_message() with spending constraints. " +
-      "See docs/move-policy-template.move for the template."
-  );
+  config: ZcashIkaConfig,
+  walletId: string,
+  policy: SpendPolicy
+): Promise<PolicyResult> {
+  const packageId = getPolicyPackageId();
+  if (packageId === "0x0") {
+    throw new Error(
+      "Policy Move module not deployed. Set POLICY_PACKAGE_ID env var " +
+      "after running: sui client publish --path move/"
+    );
+  }
+
+  const { suiClient, keypair } = await initClients(config);
+
+  const tx = new Transaction();
+
+  // 0x6 is the shared Clock object on Sui
+  const cap = tx.moveCall({
+    target: `${packageId}::policy::create_policy`,
+    arguments: [
+      tx.pure.address(walletId),
+      tx.pure.u64(policy.maxPerTx),
+      tx.pure.u64(policy.maxDaily),
+      tx.object("0x6"),
+    ],
+  });
+
+  // Transfer the returned PolicyCap to sender
+  const sender = keypair.getPublicKey().toSuiAddress();
+  tx.transferObjects([cap], sender);
+
+  // Add allowed recipients if any
+  // Done in separate calls after creation since create_policy starts with empty list
+
+  const result = await suiClient.signAndExecuteTransaction({
+    transaction: tx,
+    signer: keypair,
+    options: { showEffects: true, showObjectChanges: true },
+  });
+
+  if (result.effects?.status?.status !== "success") {
+    throw new Error(`setPolicy TX failed: ${result.effects?.status?.error}`);
+  }
+
+  // Extract created object IDs
+  let policyId = "";
+  let capId = "";
+
+  const changes = (result as any).objectChanges || [];
+  for (const change of changes) {
+    if (change.type !== "created") continue;
+    const objType = change.objectType || "";
+    if (objType.includes("::policy::SpendPolicy")) {
+      policyId = change.objectId;
+    } else if (objType.includes("::policy::PolicyCap")) {
+      capId = change.objectId;
+    }
+  }
+
+  if (!policyId || !capId) {
+    // Fallback: scan created effects
+    const created = result.effects?.created || [];
+    for (const obj of created) {
+      const id = (obj as any).reference?.objectId || (obj as any).objectId;
+      if (id && !policyId) policyId = id;
+      else if (id && !capId) capId = id;
+    }
+  }
+
+  // Add recipients in a second tx if needed
+  if (policy.allowedRecipients.length > 0 && policyId && capId) {
+    const tx2 = new Transaction();
+    for (const addr of policy.allowedRecipients) {
+      const addrBytes = new TextEncoder().encode(addr);
+      tx2.moveCall({
+        target: `${packageId}::policy::add_recipient_entry`,
+        arguments: [
+          tx2.object(policyId),
+          tx2.object(capId),
+          tx2.pure.vector("u8", Array.from(addrBytes)),
+        ],
+      });
+    }
+    await suiClient.signAndExecuteTransaction({
+      transaction: tx2,
+      signer: keypair,
+      options: { showEffects: true },
+    });
+  }
+
+  return { policyId, capId, txDigest: result.digest };
+}
+
+/**
+ * Query a SpendPolicy object and check if a spend would be allowed.
+ * Returns the full policy state plus a boolean for the specific check.
+ */
+export async function checkPolicy(
+  config: ZcashIkaConfig,
+  policyId: string,
+  amount?: number,
+  recipient?: string,
+): Promise<PolicyState & { allowed: boolean }> {
+  const { suiClient } = await initClients(config);
+
+  const obj = await suiClient.getObject({
+    id: policyId,
+    options: { showContent: true },
+  });
+
+  const content = (obj.data?.content as any);
+  if (!content || content.dataType !== "moveObject") {
+    throw new Error(`Policy object ${policyId} not found or not a Move object`);
+  }
+
+  const fields = content.fields;
+
+  const state: PolicyState = {
+    policyId,
+    dwalletId: fields.dwallet_id,
+    owner: fields.owner,
+    maxPerTx: Number(fields.max_per_tx),
+    maxDaily: Number(fields.max_daily),
+    dailySpent: Number(fields.daily_spent),
+    windowStart: Number(fields.window_start),
+    allowedRecipients: (fields.allowed_recipients || []).map((r: number[]) =>
+      new TextDecoder().decode(new Uint8Array(r))
+    ),
+    frozen: fields.frozen,
+  };
+
+  // Client-side policy check (mirrors Move logic)
+  let allowed = true;
+  if (state.frozen) {
+    allowed = false;
+  } else if (amount !== undefined) {
+    if (amount > state.maxPerTx) {
+      allowed = false;
+    } else {
+      const now = Date.now();
+      const daily = (now >= state.windowStart + 86_400_000) ? 0 : state.dailySpent;
+      if (daily + amount > state.maxDaily) {
+        allowed = false;
+      }
+    }
+    if (allowed && recipient && state.allowedRecipients.length > 0) {
+      allowed = state.allowedRecipients.includes(recipient);
+    }
+  }
+
+  return { ...state, allowed };
 }
 
 /**
  * Spend from a Zcash transparent wallet.
  *
- * 1. Build Zcash transparent transaction (requires Zebra)
- * 2. Compute sighash (DoubleSHA256)
- * 3. Sign via Ika 2PC-MPC (secp256k1/ECDSA)
- * 4. Attach signature to transaction
+ * Full pipeline:
+ * 1. Fetch UTXOs from Zebra
+ * 2. Build unsigned TX, compute ZIP 244 sighashes
+ * 3. Sign each sighash via Ika 2PC-MPC
+ * 4. Attach signatures, serialize signed TX
  * 5. Broadcast via Zebra sendrawtransaction
- * 6. Attest via ZAP1 as AGENT_ACTION
+ * 6. Attest to ZAP1 as AGENT_ACTION
  */
 export async function spendTransparent(
   config: ZcashIkaConfig,
@@ -723,14 +916,117 @@ export async function spendTransparent(
   encryptionSeed: string,
   request: SpendRequest
 ): Promise<SpendResult> {
-  // Build transaction, extract sighash
-  // For now: the caller provides the sighash directly via sign()
-  // This function will be the full pipeline once we have tx building
-  throw new Error(
-    "spendTransparent requires Zcash transparent tx builder. " +
-      "Use sign() directly with a pre-computed sighash for now. " +
-      "Full pipeline: build tx -> sighash -> sign() -> attach sig -> broadcast."
+  const zebraUrl = config.zebraRpcUrl;
+  if (!zebraUrl) {
+    throw new Error("zebraRpcUrl required for transparent spend");
+  }
+
+  // Fetch the dWallet to get the public key
+  const { ikaClient } = await initClients(config);
+  const dWallet = await ikaClient.getDWallet(walletId);
+  if (!dWallet?.state?.Active) {
+    throw new Error(`dWallet ${walletId} not Active`);
+  }
+
+  const rawOutput = dWallet.state.Active.public_output;
+  const outputBytes = new Uint8Array(
+    Array.isArray(rawOutput) ? rawOutput : Array.from(rawOutput)
   );
+  const pubkey = await publicKeyFromDWalletOutput(Curve.SECP256K1, outputBytes);
+  if (!pubkey || pubkey.length !== 33) {
+    throw new Error("Could not extract 33-byte compressed pubkey from dWallet");
+  }
+
+  // Derive our t-address from the pubkey
+  const ourAddress = deriveZcashAddress(pubkey, config.network);
+
+  // Step 1: Fetch UTXOs
+  const allUtxos = await fetchUTXOs(zebraUrl, ourAddress);
+  if (allUtxos.length === 0) {
+    throw new Error(`No UTXOs found for ${ourAddress}`);
+  }
+
+  // Step 2: Select UTXOs and build unsigned TX
+  const fee = estimateFee(
+    Math.min(allUtxos.length, 3), // estimate input count
+    2 // recipient + change
+  );
+  const { selected } = selectUTXOs(allUtxos, request.amount, fee);
+
+  // Recompute fee with actual input count
+  const actualFee = estimateFee(selected.length, 2);
+  const { unsignedTx, sighashes, txid } = buildUnsignedTx(
+    selected,
+    request.to,
+    request.amount,
+    actualFee,
+    ourAddress, // change back to our address
+    BRANCH_ID.NU5
+  );
+
+  // Step 3: Sign each sighash via MPC
+  const signatures: Buffer[] = [];
+  for (const sighash of sighashes) {
+    const signResult = await sign(config, {
+      messageHash: new Uint8Array(sighash),
+      walletId,
+      chain: "zcash-transparent",
+      encryptionSeed,
+    });
+    signatures.push(Buffer.from(signResult.signature));
+  }
+
+  // Step 4: Attach signatures
+  const txHex = attachSignatures(
+    selected,
+    request.to,
+    request.amount,
+    actualFee,
+    ourAddress,
+    signatures,
+    Buffer.from(pubkey),
+    BRANCH_ID.NU5
+  );
+
+  // Step 5: Broadcast
+  const broadcastTxid = await broadcastTx(zebraUrl, txHex);
+
+  // Step 6: Attest to ZAP1
+  let leafHash = "";
+  if (config.zap1ApiUrl && config.zap1ApiKey) {
+    try {
+      const attestResp = await fetch(`${config.zap1ApiUrl}/attest`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${config.zap1ApiKey}`,
+        },
+        body: JSON.stringify({
+          event_type: "AGENT_ACTION",
+          agent_id: walletId,
+          action: "transparent_spend",
+          chain_txid: broadcastTxid,
+          recipient: request.to,
+          amount: request.amount,
+          fee: actualFee,
+          memo: request.memo || "",
+        }),
+      });
+      if (attestResp.ok) {
+        const attestData = (await attestResp.json()) as { leaf_hash?: string };
+        leafHash = attestData.leaf_hash || "";
+      }
+    } catch {
+      // Attestation failure is non-fatal - tx already broadcast
+    }
+  }
+
+  return {
+    txid: broadcastTxid,
+    leafHash,
+    chain: "zcash-transparent",
+    policyChecked: false, // policy enforcement via Move module is separate
+  };
 }
 
 /**
