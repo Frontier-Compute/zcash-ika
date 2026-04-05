@@ -252,23 +252,8 @@ function hashOutputs(outputs: TransparentOutput[], branchId: number): Buffer {
   return blake2b256(data, personalization("ZTxIdOutputsHash"));
 }
 
-// Transparent inputs digest (ZIP 244 section T.3a)
-function transparentInputsDigest(inputs: TransparentInput[], branchId: number): Buffer {
-  const prevoutsHash = hashPrevouts(inputs, branchId);
-  const amountsHash = hashAmounts(inputs, branchId);
-  const scriptPubKeysHash = hashScriptPubKeys(inputs, branchId);
-  const sequencesHash = hashSequences(inputs, branchId);
-  const data = Buffer.concat([prevoutsHash, amountsHash, scriptPubKeysHash, sequencesHash]);
-  return blake2b256(data, personalization("ZTxIdTrInHash___"));
-}
-
-// Transparent outputs digest (ZIP 244 section T.3b)
-function transparentOutputsDigest(outputs: TransparentOutput[], branchId: number): Buffer {
-  const outputsHash = hashOutputs(outputs, branchId);
-  return blake2b256(outputsHash, personalization("ZTxIdTrOutHash__"));
-}
-
-// Full transparent digest for txid (ZIP 244 T.3)
+// Full transparent digest for txid (ZIP 244 T.2)
+// transparent_digest = BLAKE2b("ZTxIdTranspaHash", prevouts || sequences || outputs)
 function transparentDigest(
   inputs: TransparentInput[],
   outputs: TransparentOutput[],
@@ -277,10 +262,11 @@ function transparentDigest(
   if (inputs.length === 0 && outputs.length === 0) {
     return blake2b256(Buffer.alloc(0), personalization("ZTxIdTranspaHash"));
   }
-  const inDigest = transparentInputsDigest(inputs, branchId);
-  const outDigest = transparentOutputsDigest(outputs, branchId);
+  const prevoutsDigest = hashPrevouts(inputs, branchId);
+  const sequenceDigest = hashSequences(inputs, branchId);
+  const outputsDigest = hashOutputs(outputs, branchId);
   return blake2b256(
-    Buffer.concat([inDigest, outDigest]),
+    Buffer.concat([prevoutsDigest, sequenceDigest, outputsDigest]),
     personalization("ZTxIdTranspaHash")
   );
 }
@@ -299,7 +285,7 @@ function headerDigest(
   expiryHeight: number
 ): Buffer {
   const data = Buffer.alloc(4 + 4 + 4 + 4 + 4);
-  writeU32LE(data, version, 0);
+  writeU32LE(data, (version | (1 << 31)) >>> 0, 0);
   writeU32LE(data, versionGroupId, 4);
   writeU32LE(data, branchId, 8);
   writeU32LE(data, lockTime, 12);
