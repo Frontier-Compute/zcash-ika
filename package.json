@@ -12,7 +12,8 @@
   "dependencies": {
     "@ika.xyz/sdk": "^0.3.1",
     "@mysten/sui": "^2.5.0",
-    "blakejs": "^1.2.1"
+    "blakejs": "^1.2.1",
+    "elliptic": "^6.6.1"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",

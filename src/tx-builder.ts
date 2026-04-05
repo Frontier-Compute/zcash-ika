@@ -19,6 +19,7 @@ const TX_VERSION_GROUP_ID = 0x26a7270a;
 export const BRANCH_ID = {
   NU5: 0xc2d6d0b4,
   NU6: 0xc8e71055,
+  NU61: 0x4dec4df0,
 } as const;
 
 // SIGHASH flags
@@ -205,7 +206,7 @@ function hashPrevouts(inputs: TransparentInput[], branchId: number): Buffer {
     parts.push(outpoint);
   }
   const data = Buffer.concat(parts);
-  return blake2b256(data, personalization("ZTxIdPrevoutHash", branchIdBytes(branchId)));
+  return blake2b256(data, personalization("ZTxIdPrevoutHash"));
 }
 
 // Hash of all input amounts
@@ -214,7 +215,7 @@ function hashAmounts(inputs: TransparentInput[], branchId: number): Buffer {
   for (let i = 0; i < inputs.length; i++) {
     writeI64LE(data, inputs[i].value, i * 8);
   }
-  return blake2b256(data, personalization("ZTxTrAmountsHash", branchIdBytes(branchId)));
+  return blake2b256(data, personalization("ZTxTrAmountsHash"));
 }
 
 // Hash of all input scriptPubKeys
@@ -225,7 +226,7 @@ function hashScriptPubKeys(inputs: TransparentInput[], branchId: number): Buffer
     parts.push(inp.script);
   }
   const data = Buffer.concat(parts);
-  return blake2b256(data, personalization("ZTxTrScriptsHash", branchIdBytes(branchId)));
+  return blake2b256(data, personalization("ZTxTrScriptsHash"));
 }
 
 // Hash of all sequences
@@ -234,7 +235,7 @@ function hashSequences(inputs: TransparentInput[], branchId: number): Buffer {
   for (let i = 0; i < inputs.length; i++) {
     writeU32LE(data, inputs[i].sequence, i * 4);
   }
-  return blake2b256(data, personalization("ZTxIdSequencHash", branchIdBytes(branchId)));
+  return blake2b256(data, personalization("ZTxIdSequencHash"));
 }
 
 // Hash of all transparent outputs
@@ -248,7 +249,7 @@ function hashOutputs(outputs: TransparentOutput[], branchId: number): Buffer {
     parts.push(out.script);
   }
   const data = Buffer.concat(parts);
-  return blake2b256(data, personalization("ZTxIdOutputsHash", branchIdBytes(branchId)));
+  return blake2b256(data, personalization("ZTxIdOutputsHash"));
 }
 
 // Transparent inputs digest (ZIP 244 section T.3a)
@@ -258,13 +259,13 @@ function transparentInputsDigest(inputs: TransparentInput[], branchId: number): 
   const scriptPubKeysHash = hashScriptPubKeys(inputs, branchId);
   const sequencesHash = hashSequences(inputs, branchId);
   const data = Buffer.concat([prevoutsHash, amountsHash, scriptPubKeysHash, sequencesHash]);
-  return blake2b256(data, personalization("ZTxIdTrInHash__", branchIdBytes(branchId)));
+  return blake2b256(data, personalization("ZTxIdTrInHash___"));
 }
 
 // Transparent outputs digest (ZIP 244 section T.3b)
 function transparentOutputsDigest(outputs: TransparentOutput[], branchId: number): Buffer {
   const outputsHash = hashOutputs(outputs, branchId);
-  return blake2b256(outputsHash, personalization("ZTxIdTrOutHash_", branchIdBytes(branchId)));
+  return blake2b256(outputsHash, personalization("ZTxIdTrOutHash__"));
 }
 
 // Full transparent digest for txid (ZIP 244 T.3)
@@ -274,19 +275,19 @@ function transparentDigest(
   branchId: number
 ): Buffer {
   if (inputs.length === 0 && outputs.length === 0) {
-    return blake2b256(Buffer.alloc(0), personalization("ZTxIdTranspaHash", branchIdBytes(branchId)));
+    return blake2b256(Buffer.alloc(0), personalization("ZTxIdTranspaHash"));
   }
   const inDigest = transparentInputsDigest(inputs, branchId);
   const outDigest = transparentOutputsDigest(outputs, branchId);
   return blake2b256(
     Buffer.concat([inDigest, outDigest]),
-    personalization("ZTxIdTranspaHash", branchIdBytes(branchId))
+    personalization("ZTxIdTranspaHash")
   );
 }
 
 // Sapling digest (empty bundle)
-function emptyBundleDigest(tag: string, branchId: number): Buffer {
-  return blake2b256(Buffer.alloc(0), personalization(tag, branchIdBytes(branchId)));
+function emptyBundleDigest(tag: string): Buffer {
+  return blake2b256(Buffer.alloc(0), personalization(tag));
 }
 
 // Header digest (ZIP 244 T.1)
@@ -303,7 +304,7 @@ function headerDigest(
   writeU32LE(data, branchId, 8);
   writeU32LE(data, lockTime, 12);
   writeU32LE(data, expiryHeight, 16);
-  return blake2b256(data, personalization("ZTxIdHeadersHash", branchIdBytes(branchId)));
+  return blake2b256(data, personalization("ZTxIdHeadersHash"));
 }
 
 // Transaction digest for txid (ZIP 244 T)
@@ -316,16 +317,21 @@ function txidDigest(
 ): Buffer {
   const hdrDigest = headerDigest(TX_VERSION, TX_VERSION_GROUP_ID, branchId, lockTime, expiryHeight);
   const txpDigest = transparentDigest(inputs, outputs, branchId);
-  const sapDigest = emptyBundleDigest("ZTxIdSaplingHash", branchId);
-  const orchDigest = emptyBundleDigest("ZTxIdOrchardHash", branchId);
+  const sapDigest = emptyBundleDigest("ZTxIdSaplingHash");
+  const orchDigest = emptyBundleDigest("ZTxIdOrchardHash");
   return blake2b256(
     Buffer.concat([hdrDigest, txpDigest, sapDigest, orchDigest]),
     personalization("ZcashTxHash__", branchIdBytes(branchId))
   );
 }
 
-// Per-input sighash for signing (ZIP 244 S.2 - transparent)
-// This is the hash that actually gets signed by ECDSA
+// Per-input sighash for signing (ZIP 244 signature_digest)
+// Structure: BLAKE2b("ZcashTxHash_" || BRANCH_ID,
+//   S.1: header_digest
+//   S.2: transparent_sig_digest (NOT the txid transparent digest)
+//   S.3: sapling_digest
+//   S.4: orchard_digest
+// )
 function transparentSighash(
   inputs: TransparentInput[],
   outputs: TransparentOutput[],
@@ -335,53 +341,63 @@ function transparentSighash(
   inputIndex: number,
   hashType: number
 ): Buffer {
-  // T.1: header digest
+  // S.1: header digest (same as T.1)
   const hdrDigest = headerDigest(TX_VERSION, TX_VERSION_GROUP_ID, branchId, lockTime, expiryHeight);
 
-  // T.3: transparent digest (full, for the txid computation)
-  const txpDigest = transparentDigest(inputs, outputs, branchId);
+  // S.2: transparent_sig_digest
+  // For SIGHASH_ALL without ANYONECANPAY:
+  // S.2a: hash_type (1 byte)
+  // S.2b: prevouts_sig_digest = prevouts_digest (same as T.2a)
+  // S.2c: amounts_sig_digest
+  // S.2d: scriptpubkeys_sig_digest
+  // S.2e: sequence_sig_digest = sequence_digest (same as T.2b)
+  // S.2f: outputs_sig_digest = outputs_digest (same as T.2c)
+  // S.2g: txin_sig_digest (per-input)
+  const prevoutsSigDigest = hashPrevouts(inputs, branchId);
+  const amountsSigDigest = hashAmounts(inputs, branchId);
+  const scriptpubkeysSigDigest = hashScriptPubKeys(inputs, branchId);
+  const sequenceSigDigest = hashSequences(inputs, branchId);
+  const outputsSigDigest = hashOutputs(outputs, branchId);
 
-  // T.4: sapling digest (empty)
-  const sapDigest = emptyBundleDigest("ZTxIdSaplingHash", branchId);
-
-  // T.5: orchard digest (empty)
-  const orchDigest = emptyBundleDigest("ZTxIdOrchardHash", branchId);
-
-  // S.2: per-input transparent sighash data
-  // hash_type (1 byte)
-  // prevout (32 + 4 bytes)
-  // value (8 bytes)
-  // scriptPubKey (compact size + script bytes)
-  // sequence (4 bytes)
+  // S.2g: txin_sig_digest for the input being signed
   const inp = inputs[inputIndex];
   const prevout = Buffer.alloc(36);
   inp.prevTxid.copy(prevout, 0);
   writeU32LE(prevout, inp.prevIndex, 32);
-
   const valueBuf = Buffer.alloc(8);
   writeI64LE(valueBuf, inp.value, 0);
-
   const seqBuf = Buffer.alloc(4);
   writeU32LE(seqBuf, inp.sequence, 0);
 
-  const txinSigDigestData = Buffer.concat([
-    Buffer.from([hashType]),
-    prevout,
-    valueBuf,
-    compactSize(inp.script.length),
-    inp.script,
-    seqBuf,
-  ]);
-
   const txinSigDigest = blake2b256(
-    txinSigDigestData,
-    personalization("Zcash___TxInHash", branchIdBytes(branchId))
+    Buffer.concat([prevout, valueBuf, compactSize(inp.script.length), inp.script, seqBuf]),
+    personalization("Zcash___TxInHash")
   );
 
-  // Final sighash: BLAKE2b of all digests
+  // S.2: transparent_sig_digest
+  const transparentSigDigest = blake2b256(
+    Buffer.concat([
+      Buffer.from([hashType]),
+      prevoutsSigDigest,
+      amountsSigDigest,
+      scriptpubkeysSigDigest,
+      sequenceSigDigest,
+      outputsSigDigest,
+      txinSigDigest,
+    ]),
+    personalization("ZTxIdTranspaHash")
+  );
+
+  // S.3: sapling digest (empty)
+  const sapDigest = emptyBundleDigest("ZTxIdSaplingHash");
+
+  // S.4: orchard digest (empty)
+  const orchDigest = emptyBundleDigest("ZTxIdOrchardHash");
+
+  // Final signature_digest
   return blake2b256(
-    Buffer.concat([hdrDigest, txpDigest, sapDigest, orchDigest, txinSigDigest]),
-    personalization("ZcashTxHash__", branchIdBytes(branchId))
+    Buffer.concat([hdrDigest, transparentSigDigest, sapDigest, orchDigest]),
+    personalization("ZcashTxHash_", branchIdBytes(branchId))
   );
 }
 
@@ -549,7 +565,7 @@ export function buildUnsignedTx(
   amount: number,
   fee: number = 10000,
   changeAddress: string,
-  branchId: number = BRANCH_ID.NU5
+  branchId: number = BRANCH_ID.NU61
 ): { unsignedTx: Buffer; sighashes: Buffer[]; txid: Buffer } {
   if (utxos.length === 0) throw new Error("No UTXOs provided");
   if (amount <= 0) throw new Error("Amount must be positive");
@@ -635,7 +651,7 @@ export function attachSignatures(
   changeAddress: string,
   signatures: Buffer[],
   pubkey: Buffer,
-  branchId: number = BRANCH_ID.NU5
+  branchId: number = BRANCH_ID.NU61
 ): string {
   if (signatures.length !== utxos.length) {
     throw new Error(
