@@ -73,6 +73,29 @@ export {
 } from "./tx-builder.js";
 export type { UTXO } from "./tx-builder.js";
 
+import {
+  fetchBtcUTXOs,
+  selectBtcUTXOs,
+  buildUnsignedBtcTx,
+  attachBtcSignatures,
+  serializeBtcTx,
+  broadcastBtcTx,
+  estimateBtcFee,
+  computeBtcSighash,
+} from "./btc-tx-builder.js";
+
+export {
+  fetchBtcUTXOs,
+  selectBtcUTXOs,
+  buildUnsignedBtcTx,
+  attachBtcSignatures,
+  serializeBtcTx,
+  broadcastBtcTx,
+  estimateBtcFee,
+  computeBtcSighash,
+} from "./btc-tx-builder.js";
+export type { BtcUTXO, BtcTxOutput, BtcNetwork } from "./btc-tx-builder.js";
+
 // Chain identifiers for wallet creation
 export type Chain = "zcash-transparent" | "bitcoin" | "ethereum";
 
@@ -1086,7 +1109,14 @@ export async function spendTransparent(
 
 /**
  * Spend from a Bitcoin wallet.
- * Same MPC flow as Zcash transparent - DoubleSHA256 sighash, ECDSA signature.
+ *
+ * Full pipeline:
+ * 1. Fetch UTXOs from Blockstream API
+ * 2. Build unsigned TX, compute legacy P2PKH sighashes
+ * 3. Sign each sighash via Ika 2PC-MPC
+ * 4. Attach signatures, serialize signed TX
+ * 5. Broadcast via Blockstream API
+ * 6. Attest to ZAP1 as AGENT_ACTION
  */
 export async function spendBitcoin(
   config: ZcashIkaConfig,
@@ -1094,10 +1124,104 @@ export async function spendBitcoin(
   encryptionSeed: string,
   request: SpendRequest
 ): Promise<SpendResult> {
-  throw new Error(
-    "spendBitcoin requires Bitcoin tx builder. " +
-      "Use sign() with chain='bitcoin' and a pre-computed sighash for now."
+  // Fetch the dWallet to get the public key
+  const { ikaClient } = await initClients(config);
+  const dWallet = await ikaClient.getDWallet(walletId);
+  if (!dWallet?.state?.Active) {
+    throw new Error(`dWallet ${walletId} not Active`);
+  }
+
+  const rawOutput = dWallet.state.Active.public_output;
+  const outputBytes = new Uint8Array(
+    Array.isArray(rawOutput) ? rawOutput : Array.from(rawOutput)
   );
+  const pubkey = await publicKeyFromDWalletOutput(Curve.SECP256K1, outputBytes);
+  if (!pubkey || pubkey.length !== 33) {
+    throw new Error("Could not extract 33-byte compressed pubkey from dWallet");
+  }
+
+  const btcNetwork = config.network === "mainnet" ? "mainnet" : "testnet";
+
+  // Derive our BTC address from the pubkey
+  const ourAddress = deriveBitcoinAddress(pubkey, btcNetwork);
+
+  // Step 1: Fetch UTXOs
+  const allUtxos = await fetchBtcUTXOs(ourAddress, btcNetwork);
+  if (allUtxos.length === 0) {
+    throw new Error(`No UTXOs found for ${ourAddress}`);
+  }
+
+  // Step 2: Select UTXOs and build unsigned TX
+  const feeRate = 10; // sat/vbyte, conservative default
+  const { selected, fee } = selectBtcUTXOs(allUtxos, request.amount, feeRate);
+
+  const { sighashes, inputs, outputs } = buildUnsignedBtcTx(
+    selected,
+    [{ address: request.to, value: request.amount }],
+    ourAddress, // change back to our address
+    fee
+  );
+
+  // Step 3: Sign each sighash via MPC
+  const signatures: Buffer[] = [];
+  for (const sighash of sighashes) {
+    const signResult = await sign(config, {
+      messageHash: new Uint8Array(sighash),
+      walletId,
+      chain: "bitcoin",
+      encryptionSeed,
+    });
+    signatures.push(Buffer.from(signResult.signature));
+  }
+
+  // Step 4: Attach signatures and serialize
+  const signedTx = attachBtcSignatures(
+    inputs,
+    outputs,
+    signatures,
+    Buffer.from(pubkey)
+  );
+  const txHex = signedTx.toString("hex");
+
+  // Step 5: Broadcast
+  const broadcastTxid = await broadcastBtcTx(txHex, btcNetwork);
+
+  // Step 6: Attest to ZAP1
+  let leafHash = "";
+  if (config.zap1ApiUrl && config.zap1ApiKey) {
+    try {
+      const attestResp = await fetch(`${config.zap1ApiUrl}/attest`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${config.zap1ApiKey}`,
+        },
+        body: JSON.stringify({
+          event_type: "AGENT_ACTION",
+          agent_id: walletId,
+          action: "bitcoin_spend",
+          chain_txid: broadcastTxid,
+          recipient: request.to,
+          amount: request.amount,
+          fee,
+          memo: request.memo || "",
+        }),
+      });
+      if (attestResp.ok) {
+        const attestData = (await attestResp.json()) as { leaf_hash?: string };
+        leafHash = attestData.leaf_hash || "";
+      }
+    } catch {
+      // Attestation failure is non-fatal - tx already broadcast
+    }
+  }
+
+  return {
+    txid: broadcastTxid,
+    leafHash,
+    chain: "bitcoin",
+    policyChecked: false,
+  };
 }
 
 /**

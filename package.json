@@ -1,6 +1,6 @@
 {
   "name": "@frontiercompute/zcash-ika",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Split-key custody for Zcash, Bitcoin, and EVM. 2PC-MPC signing, on-chain spend policy, transparent TX builder, ZAP1 attestation.",
   "type": "module",
   "main": "dist/index.js",
@@ -25,7 +25,9 @@
     "dist/tx-builder.js",
     "dist/tx-builder.d.ts",
     "dist/hybrid.js",
-    "dist/hybrid.d.ts"
+    "dist/hybrid.d.ts",
+    "dist/btc-tx-builder.js",
+    "dist/btc-tx-builder.d.ts"
   ],
   "repository": {
     "type": "git",
