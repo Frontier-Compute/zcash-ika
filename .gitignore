@@ -4,3 +4,5 @@ dist/
 .env.*
 move/build/
 btc-testnet-spend.cjs
+mainnet-dkg.cjs
+mainnet-dkg-v2.cjs

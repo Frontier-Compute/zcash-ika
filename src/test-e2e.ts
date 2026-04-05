@@ -479,7 +479,7 @@ async function main() {
   console.log(`DKG TX:     ${dkgResult.digest}`);
   console.log(`Presign TX: ${presignResult.digest}`);
   console.log(`Sign TX:    ${signResult.digest}`);
-  console.log(`Seed:       ${seedHex}`);
+  console.log("Seed: [saved - check wallet handle]");
   console.log("========================================");
   console.log("");
   console.log("This signature was produced by Ika's 2PC-MPC network.");

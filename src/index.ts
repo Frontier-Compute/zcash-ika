@@ -1138,7 +1138,7 @@ export async function requestSpend(
   amount: number,
   recipient: string,
   chain: string,
-): Promise<{ approved: boolean; txDigest: string }> {
+): Promise<{ approved: boolean; txDigest: string; error?: string }> {
   const packageId = getPolicyPackageId();
   const { suiClient, keypair } = await initClients(config);
 
@@ -1165,7 +1165,7 @@ export async function requestSpend(
   });
 
   if (result.effects?.status?.status !== "success") {
-    return { approved: false, txDigest: result.digest };
+    return { approved: false, txDigest: result.digest, error: result.effects?.status?.error || "Policy violation" };
   }
 
   return { approved: true, txDigest: result.digest };

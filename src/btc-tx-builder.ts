@@ -327,6 +327,7 @@ export function buildUnsignedBtcTx(
   fee: number
 ): { sighashes: Buffer[]; inputs: BtcInput[]; outputs: BtcOutput[] } {
   if (utxos.length === 0) throw new Error("No UTXOs provided");
+  if (fee < 0) throw new Error("Fee must be non-negative");
 
   // Build inputs
   const inputs: BtcInput[] = utxos.map((u) => ({
@@ -356,6 +357,13 @@ export function buildUnsignedBtcTx(
     throw new Error(
       `UTXOs total ${totalInput} < outputs ${totalOutput} + fee ${fee}`
     );
+  }
+
+  // Warn on dust outputs (let the network reject them)
+  for (const out of outputs) {
+    if (out.value < 546) {
+      console.warn(`Warning: output value ${out.value} sats is below dust threshold (546)`);
+    }
   }
 
   // Compute per-input sighashes
