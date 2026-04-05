@@ -624,13 +624,18 @@ export async function sign(
 
   const presignIkaCoin = presignTx.object(ikaCoinId);
   const presignSuiCoin = presignTx.splitCoins(presignTx.gas, [50_000_000]);
-  presignIkaTx.requestGlobalPresign({
+  const presignReturn = presignIkaTx.requestGlobalPresign({
     dwalletNetworkEncryptionKeyId: dWallet.dwallet_network_encryption_key_id,
     curve: Curve.SECP256K1,
     signatureAlgorithm: SignatureAlgorithm.ECDSASecp256k1,
     ikaCoin: presignIkaCoin,
     suiCoin: presignSuiCoin,
   });
+  // Transfer split SUI coin back and presign cap to ourselves
+  presignTx.transferObjects([presignSuiCoin], address);
+  if (presignReturn) {
+    presignTx.transferObjects([presignReturn], address);
+  }
 
   const presignResult = await suiClient.signAndExecuteTransaction({
     transaction: presignTx,

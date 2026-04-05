@@ -3,3 +3,4 @@ dist/
 .env
 .env.*
 move/build/
+btc-testnet-spend.cjs
