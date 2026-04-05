@@ -28,9 +28,80 @@ import {
   publicKeyFromDWalletOutput,
   createRandomSessionIdentifier,
   CHAIN_PARAMS,
+  deriveZcashAddress,
 } from "./index.js";
 
 const NETWORK = "testnet";
+
+// Offline test: verify Zcash transparent address derivation from a known pubkey.
+// No network calls needed - runs pure crypto.
+function testAddressDerivation() {
+  console.log("=== Address derivation test ===\n");
+
+  const pubkeyHex = "03d691c837d008538ffbbb60438dad338b9b6a1a732b1b17096f890c9abdc12cb7";
+  const pubkey = Uint8Array.from(Buffer.from(pubkeyHex, "hex"));
+
+  if (pubkey.length !== 33) {
+    throw new Error(`Bad pubkey length: ${pubkey.length}`);
+  }
+
+  // Mainnet: should start with t1
+  const mainnetAddr = deriveZcashAddress(pubkey, "mainnet");
+  console.log(`Mainnet: ${mainnetAddr}`);
+  if (!mainnetAddr.startsWith("t1")) {
+    throw new Error(`Mainnet address should start with t1, got: ${mainnetAddr}`);
+  }
+
+  // Testnet: should start with tm
+  const testnetAddr = deriveZcashAddress(pubkey, "testnet");
+  console.log(`Testnet: ${testnetAddr}`);
+  if (!testnetAddr.startsWith("tm")) {
+    throw new Error(`Testnet address should start with tm, got: ${testnetAddr}`);
+  }
+
+  // Both should be 35 characters (standard Zcash t-addr length)
+  if (mainnetAddr.length !== 35) {
+    throw new Error(`Mainnet address length ${mainnetAddr.length}, expected 35`);
+  }
+  if (testnetAddr.length !== 35) {
+    throw new Error(`Testnet address length ${testnetAddr.length}, expected 35`);
+  }
+
+  // Same pubkey, same network should always give same address (deterministic)
+  const mainnetAddr2 = deriveZcashAddress(pubkey, "mainnet");
+  if (mainnetAddr !== mainnetAddr2) {
+    throw new Error("Address derivation not deterministic");
+  }
+
+  // Should reject invalid inputs
+  let caught = false;
+  try {
+    deriveZcashAddress(new Uint8Array(32), "mainnet");
+  } catch {
+    caught = true;
+  }
+  if (!caught) {
+    throw new Error("Should reject non-33-byte input");
+  }
+
+  caught = false;
+  try {
+    // Valid length but bad prefix (0x04 = uncompressed)
+    const badPrefix = new Uint8Array(33);
+    badPrefix[0] = 0x04;
+    deriveZcashAddress(badPrefix, "mainnet");
+  } catch {
+    caught = true;
+  }
+  if (!caught) {
+    throw new Error("Should reject uncompressed pubkey prefix");
+  }
+
+  console.log("\nAll address derivation tests passed.\n");
+}
+
+// Run offline test immediately (no env vars needed)
+testAddressDerivation();
 
 async function main() {
   const privKeyRaw = process.env.SUI_PRIVATE_KEY;

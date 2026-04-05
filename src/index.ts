@@ -50,6 +50,7 @@ import {
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import { Transaction } from "@mysten/sui/transactions";
 import { decodeSuiPrivateKey } from "@mysten/sui/cryptography";
+import { createHash } from "node:crypto";
 
 // Chain identifiers for wallet creation
 export type Chain = "zcash-transparent" | "bitcoin" | "ethereum";
@@ -98,6 +99,94 @@ export const CHAIN_PARAMS = {
     description: "Ethereum/EVM (secp256k1/ECDSA, KECCAK256)",
   },
 } as const;
+
+// Zcash t-address version bytes (2 bytes each)
+const ZCASH_VERSION_BYTES = {
+  mainnet: Uint8Array.from([0x1c, 0xb8]), // t1...
+  testnet: Uint8Array.from([0x1d, 0x25]), // tm...
+} as const;
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function base58Encode(data: Uint8Array): string {
+  // Count leading zeros
+  let leadingZeros = 0;
+  for (const b of data) {
+    if (b !== 0) break;
+    leadingZeros++;
+  }
+  // Convert to bigint for division
+  let num = BigInt(0);
+  for (const b of data) {
+    num = num * 256n + BigInt(b);
+  }
+  const chars: string[] = [];
+  while (num > 0n) {
+    const rem = Number(num % 58n);
+    num = num / 58n;
+    chars.push(BASE58_ALPHABET[rem]);
+  }
+  // Prepend '1' for each leading zero byte
+  for (let i = 0; i < leadingZeros; i++) {
+    chars.push("1");
+  }
+  return chars.reverse().join("");
+}
+
+function sha256(data: Uint8Array): Buffer {
+  return createHash("sha256").update(data).digest();
+}
+
+function hash160(data: Uint8Array): Buffer {
+  return createHash("ripemd160").update(sha256(data)).digest();
+}
+
+/**
+ * Derive a Zcash transparent address from a compressed secp256k1 public key.
+ *
+ * Same as Bitcoin P2PKH but with Zcash 2-byte version prefix:
+ *   mainnet 0x1cb8 (t1...), testnet 0x1d25 (tm...)
+ *
+ * Steps:
+ *   1. SHA256(pubkey) then RIPEMD160 = 20-byte hash
+ *   2. Prepend 2-byte version
+ *   3. Double-SHA256 checksum (first 4 bytes)
+ *   4. Base58 encode (version + hash + checksum)
+ */
+export function deriveZcashAddress(
+  publicKey: Uint8Array,
+  network: "mainnet" | "testnet" = "mainnet"
+): string {
+  if (publicKey.length !== 33) {
+    throw new Error(
+      `Expected 33-byte compressed secp256k1 pubkey, got ${publicKey.length} bytes`
+    );
+  }
+  const prefix = publicKey[0];
+  if (prefix !== 0x02 && prefix !== 0x03) {
+    throw new Error(
+      `Invalid compressed pubkey prefix 0x${prefix.toString(16)}, expected 0x02 or 0x03`
+    );
+  }
+
+  const pubkeyHash = hash160(publicKey); // 20 bytes
+  const version = ZCASH_VERSION_BYTES[network];
+
+  // version (2) + hash160 (20) = 22 bytes
+  const payload = new Uint8Array(22);
+  payload.set(version, 0);
+  payload.set(pubkeyHash, 2);
+
+  // checksum: first 4 bytes of SHA256(SHA256(payload))
+  const checksum = sha256(sha256(payload)).subarray(0, 4);
+
+  // final: payload (22) + checksum (4) = 26 bytes
+  const full = new Uint8Array(26);
+  full.set(payload, 0);
+  full.set(checksum, 22);
+
+  return base58Encode(full);
+}
 
 export interface DWalletHandle {
   /** dWallet object ID on Sui */
@@ -361,11 +450,17 @@ export async function createWallet(
 
   const seedHex = Buffer.from(seed).toString("hex");
 
+  // Derive chain-specific address from compressed pubkey
+  let derivedAddress = "";
+  if (pubkey && pubkey.length === 33 && chain === "zcash-transparent") {
+    derivedAddress = deriveZcashAddress(pubkey, config.network);
+  }
+
   return {
     id: dwalletId,
     publicKey: pubkey || new Uint8Array(0),
     chain,
-    address: "", // Caller derives chain-specific address from pubkey
+    address: derivedAddress,
     network: config.network,
     encryptionSeed: seedHex,
   };
