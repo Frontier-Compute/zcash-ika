@@ -93,7 +93,7 @@ module zap1_policy::policy {
         if (vector::length(allowed) == 0) {
             return true
         };
-        let i = 0;
+        let mut i = 0;
         let len = vector::length(allowed);
         while (i < len) {
             if (vector::borrow(allowed, i) == recipient) {
@@ -180,22 +180,22 @@ module zap1_policy::policy {
         update_policy(policy, cap, max_per_tx, max_daily);
     }
 
-    public fun freeze(policy: &mut SpendPolicy, cap: &PolicyCap) {
+    public fun freeze_policy(policy: &mut SpendPolicy, cap: &PolicyCap) {
         assert_cap(policy, cap);
         policy.frozen = true;
     }
 
     entry fun freeze_entry(policy: &mut SpendPolicy, cap: &PolicyCap) {
-        freeze(policy, cap);
+        freeze_policy(policy, cap);
     }
 
-    public fun unfreeze(policy: &mut SpendPolicy, cap: &PolicyCap) {
+    public fun unfreeze_policy(policy: &mut SpendPolicy, cap: &PolicyCap) {
         assert_cap(policy, cap);
         policy.frozen = false;
     }
 
     entry fun unfreeze_entry(policy: &mut SpendPolicy, cap: &PolicyCap) {
-        unfreeze(policy, cap);
+        unfreeze_policy(policy, cap);
     }
 
     public fun add_recipient(
