@@ -185,12 +185,14 @@ SUI_PRIVATE_KEY=... node dist/test-e2e.js
 - [Zebra](https://github.com/ZcashFoundation/zebra) - Zcash node
 - [Sui Move](https://docs.sui.io/concepts/sui-move-concepts) - policy enforcement
 
-## See also
+## Related Packages
 
-- [@frontiercompute/zcash-mcp](https://www.npmjs.com/package/@frontiercompute/zcash-mcp) - MCP server for Zcash wallets and nodes
-- [@frontiercompute/openclaw-zap1](https://www.npmjs.com/package/@frontiercompute/openclaw-zap1) - OpenClaw attestation client for ZAP1
-- [@frontiercompute/zap1](https://www.npmjs.com/package/@frontiercompute/zap1) - ZAP1 on-chain attestation SDK
-- [@frontiercompute/zcash-ika](https://www.npmjs.com/package/@frontiercompute/zcash-ika) - Split-key custody for Zcash, Bitcoin, and EVM (this package)
+| Package | What it does |
+|---------|-------------|
+| [@frontiercompute/zcash-mcp](https://www.npmjs.com/package/@frontiercompute/zcash-mcp) | MCP server for Zcash (22 tools) |
+| [@frontiercompute/openclaw-zap1](https://www.npmjs.com/package/@frontiercompute/openclaw-zap1) | OpenClaw skill for ZAP1 attestation |
+| [@frontiercompute/zap1](https://www.npmjs.com/package/@frontiercompute/zap1) | ZAP1 attestation client |
+| [@frontiercompute/silo-zap1](https://www.npmjs.com/package/@frontiercompute/silo-zap1) | Silo agent attestation via ZAP1 |
 
 ## License
 
