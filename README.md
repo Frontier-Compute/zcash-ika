@@ -3,6 +3,8 @@
 Split-key custody for Zcash, Bitcoin, and EVM chains. The private key never exists whole. Spend policy enforced on-chain. Every action attested to Zcash.
 
 [![npm](https://img.shields.io/npm/v/@frontiercompute/zcash-ika)](https://www.npmjs.com/package/@frontiercompute/zcash-ika)
+[![downloads](https://img.shields.io/npm/dw/@frontiercompute/zcash-ika)](https://www.npmjs.com/package/@frontiercompute/zcash-ika)
+[![license](https://img.shields.io/npm/l/@frontiercompute/zcash-ika)](https://github.com/Frontier-Compute/zcash-ika/blob/main/LICENSE)
 
 ## What this does
 
@@ -182,6 +184,13 @@ SUI_PRIVATE_KEY=... node dist/test-e2e.js
 - [ZAP1](https://pay.frontiercompute.io) - on-chain attestation protocol
 - [Zebra](https://github.com/ZcashFoundation/zebra) - Zcash node
 - [Sui Move](https://docs.sui.io/concepts/sui-move-concepts) - policy enforcement
+
+## See also
+
+- [@frontiercompute/zcash-mcp](https://www.npmjs.com/package/@frontiercompute/zcash-mcp) - MCP server for Zcash wallets and nodes
+- [@frontiercompute/openclaw-zap1](https://www.npmjs.com/package/@frontiercompute/openclaw-zap1) - OpenClaw attestation client for ZAP1
+- [@frontiercompute/zap1](https://www.npmjs.com/package/@frontiercompute/zap1) - ZAP1 on-chain attestation SDK
+- [@frontiercompute/zcash-ika](https://www.npmjs.com/package/@frontiercompute/zcash-ika) - Split-key custody for Zcash, Bitcoin, and EVM (this package)
 
 ## License
 
