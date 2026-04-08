@@ -497,3 +497,342 @@ export async function broadcastBtcTx(
   // Blockstream returns the txid as plain text
   return (await resp.text()).trim();
 }
+
+
+// ---------------------------------------------------------------------------
+// P2TR (Taproot) key-path spend support (BIP 340/341/350)
+// ---------------------------------------------------------------------------
+
+// Bech32m charset
+const BECH32M_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const BECH32M_CONST = 0x2bc830a3;
+
+function bech32mPolymod(values: number[]): number {
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const v of values) {
+    const b = chk >> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) {
+      if ((b >> i) & 1) chk ^= GEN[i];
+    }
+  }
+  return chk;
+}
+
+function bech32mHrpExpand(hrp: string): number[] {
+  const ret: number[] = [];
+  for (const c of hrp) ret.push(c.charCodeAt(0) >> 5);
+  ret.push(0);
+  for (const c of hrp) ret.push(c.charCodeAt(0) & 31);
+  return ret;
+}
+
+function bech32mCreateChecksum(hrp: string, data: number[]): number[] {
+  const values = bech32mHrpExpand(hrp).concat(data).concat([0, 0, 0, 0, 0, 0]);
+  const polymod = bech32mPolymod(values) ^ BECH32M_CONST;
+  const ret: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    ret.push((polymod >> (5 * (5 - i))) & 31);
+  }
+  return ret;
+}
+
+function bech32mEncode(hrp: string, data: number[]): string {
+  const checksum = bech32mCreateChecksum(hrp, data);
+  const combined = data.concat(checksum);
+  let ret = hrp + "1";
+  for (const d of combined) ret += BECH32M_CHARSET[d];
+  return ret;
+}
+
+function convertBits(data: Uint8Array, fromBits: number, toBits: number, pad: boolean): number[] {
+  let acc = 0;
+  let bits = 0;
+  const ret: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  for (const value of data) {
+    acc = (acc << fromBits) | value;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      ret.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad) {
+    if (bits > 0) ret.push((acc << (toBits - bits)) & maxv);
+  } else if (bits >= fromBits || ((acc << (toBits - bits)) & maxv)) {
+    throw new Error("Invalid bit conversion");
+  }
+  return ret;
+}
+
+/**
+ * Derive a P2TR (Taproot) bech32m address from an x-only public key.
+ *
+ * BIP 341 defines P2TR output as: OP_1 <32-byte-x-only-pubkey>
+ * The address is bech32m encoded with witness version 1.
+ *
+ * For key-path-only spending (no script tree), the output key equals
+ * the internal key tweaked with an empty merkle root:
+ *   Q = P + H("TapTweak", P) * G
+ *
+ * This function takes the already-tweaked x-only pubkey (32 bytes).
+ * If using an MPC-derived key, perform the taptweak externally before
+ * calling this function.
+ */
+export function deriveTaprootAddress(
+  xOnlyPubKey: Uint8Array,
+  network: BtcNetwork = "mainnet"
+): string {
+  if (xOnlyPubKey.length !== 32) {
+    throw new Error("Expected 32-byte x-only pubkey, got " + xOnlyPubKey.length);
+  }
+  const hrp = network === "mainnet" ? "bc" : "tb";
+  const witnessVersion = 1;
+  const data5bit = convertBits(xOnlyPubKey, 8, 5, true);
+  return bech32mEncode(hrp, [witnessVersion].concat(data5bit));
+}
+
+/**
+ * Build a P2TR scriptPubKey from a 32-byte x-only public key.
+ * Format: OP_1 <0x20> <32-byte-x-only-pubkey>
+ */
+export function p2trScript(xOnlyPubKey: Uint8Array): Buffer {
+  if (xOnlyPubKey.length !== 32) {
+    throw new Error("Expected 32-byte x-only pubkey, got " + xOnlyPubKey.length);
+  }
+  const script = Buffer.alloc(34);
+  script[0] = 0x51; // OP_1 (witness v1)
+  script[1] = 0x20; // push 32 bytes
+  Buffer.from(xOnlyPubKey).copy(script, 2);
+  return script;
+}
+
+// BIP 340 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
+function taggedHash(tag: string, ...msgs: Uint8Array[]): Buffer {
+  const tagHash = sha256(Buffer.from(tag, "utf8"));
+  const parts: Uint8Array[] = [tagHash, tagHash, ...msgs];
+  return sha256(Buffer.concat(parts));
+}
+
+export interface TaprootInput {
+  prevTxid: string;     // hex txid (display order)
+  prevIndex: number;
+  value: number;        // satoshis
+  scriptPubKey: string; // hex P2TR scriptPubKey of the UTXO
+}
+
+export interface TaprootTxParams {
+  inputs: TaprootInput[];
+  outputs: BtcTxOutput[];
+  changeAddress?: string;
+  fee: number;
+  /** x-only pubkey for change output P2TR script (32 bytes) */
+  changeXOnlyPubKey?: Uint8Array;
+}
+
+/**
+ * Compute BIP 341 taproot sighash for key-path spending.
+ * Uses SIGHASH_DEFAULT (0x00) which commits to all inputs and outputs.
+ * The epoch byte (0x00) is prepended per BIP 341.
+ */
+function computeTaprootSighash(
+  inputs: { prevTxid: Buffer; prevIndex: number; value: number; scriptPubKey: Buffer; sequence: number }[],
+  outputs: BtcOutput[],
+  inputIndex: number,
+  hashType: number = 0x00
+): Buffer {
+  const parts: Buffer[] = [];
+
+  // Epoch
+  parts.push(Buffer.from([0x00]));
+  // Hash type
+  parts.push(Buffer.from([hashType]));
+
+  // Transaction version: 2
+  const ver = Buffer.alloc(4);
+  writeU32LE(ver, 2, 0);
+  parts.push(ver);
+
+  // nLockTime
+  const lt = Buffer.alloc(4);
+  writeU32LE(lt, 0, 0);
+  parts.push(lt);
+
+  // sha_prevouts
+  const prevoutsData: Buffer[] = [];
+  for (const inp of inputs) {
+    const outpoint = Buffer.alloc(36);
+    inp.prevTxid.copy(outpoint, 0);
+    writeU32LE(outpoint, inp.prevIndex, 32);
+    prevoutsData.push(outpoint);
+  }
+  parts.push(sha256(Buffer.concat(prevoutsData)));
+
+  // sha_amounts
+  const amountsData = Buffer.alloc(inputs.length * 8);
+  for (let i = 0; i < inputs.length; i++) {
+    writeI64LE(amountsData, inputs[i].value, i * 8);
+  }
+  parts.push(sha256(amountsData));
+
+  // sha_scriptpubkeys
+  const scriptsData: Buffer[] = [];
+  for (const inp of inputs) {
+    scriptsData.push(compactSize(inp.scriptPubKey.length));
+    scriptsData.push(inp.scriptPubKey);
+  }
+  parts.push(sha256(Buffer.concat(scriptsData)));
+
+  // sha_sequences
+  const seqData = Buffer.alloc(inputs.length * 4);
+  for (let i = 0; i < inputs.length; i++) {
+    writeU32LE(seqData, inputs[i].sequence, i * 4);
+  }
+  parts.push(sha256(seqData));
+
+  // sha_outputs
+  const outsData: Buffer[] = [];
+  for (const out of outputs) {
+    const valueBuf = Buffer.alloc(8);
+    writeI64LE(valueBuf, out.value, 0);
+    outsData.push(valueBuf);
+    outsData.push(compactSize(out.script.length));
+    outsData.push(out.script);
+  }
+  parts.push(sha256(Buffer.concat(outsData)));
+
+  // spend_type: 0x00 (key-path, no annex)
+  parts.push(Buffer.from([0x00]));
+
+  // Input index
+  const idxBuf = Buffer.alloc(4);
+  writeU32LE(idxBuf, inputIndex, 0);
+  parts.push(idxBuf);
+
+  return taggedHash("TapSighash", Buffer.concat(parts));
+}
+
+/**
+ * Build an unsigned P2TR (Taproot) key-path spend transaction.
+ *
+ * Returns per-input sighashes for BIP 340 Schnorr signing.
+ * The witness for key-path spend is a single 64-byte Schnorr signature
+ * (no sighash type byte appended for SIGHASH_DEFAULT).
+ *
+ * Transaction version is 2 (segwit). Uses witness serialization.
+ */
+export function buildTaprootTx(params: TaprootTxParams): {
+  sighashes: Buffer[];
+  inputs: { prevTxid: Buffer; prevIndex: number; value: number; scriptPubKey: Buffer; sequence: number }[];
+  outputs: BtcOutput[];
+} {
+  const { inputs: rawInputs, outputs: txOutputs, fee, changeAddress, changeXOnlyPubKey } = params;
+
+  if (rawInputs.length === 0) throw new Error("No inputs provided");
+
+  const inputs = rawInputs.map((inp) => ({
+    prevTxid: reverseTxid(inp.prevTxid),
+    prevIndex: inp.prevIndex,
+    value: inp.value,
+    scriptPubKey: Buffer.from(inp.scriptPubKey, "hex"),
+    sequence: 0xfffffffd, // RBF-enabled default
+  }));
+
+  const totalInput = rawInputs.reduce((s, u) => s + u.value, 0);
+  const totalOutput = txOutputs.reduce((s, o) => s + o.value, 0);
+  const change = totalInput - totalOutput - fee;
+
+  const outputs: BtcOutput[] = txOutputs.map((o) => ({
+    value: o.value,
+    script: scriptFromAddress(o.address),
+  }));
+
+  if (change > 0 && change >= 546) {
+    if (changeXOnlyPubKey) {
+      outputs.push({ value: change, script: p2trScript(changeXOnlyPubKey) });
+    } else if (changeAddress) {
+      outputs.push({ value: change, script: scriptFromAddress(changeAddress) });
+    }
+  } else if (change < 0) {
+    throw new Error("Inputs total " + totalInput + " < outputs " + totalOutput + " + fee " + fee);
+  }
+
+  const sighashes: Buffer[] = [];
+  for (let i = 0; i < inputs.length; i++) {
+    sighashes.push(computeTaprootSighash(inputs, outputs, i));
+  }
+
+  return { sighashes, inputs, outputs };
+}
+
+/**
+ * Serialize a signed Taproot transaction (segwit v1 with witness).
+ *
+ * Each input witness is a single stack item: the 64-byte Schnorr signature
+ * (for SIGHASH_DEFAULT, no sighash byte is appended).
+ */
+export function serializeTaprootTx(
+  inputs: { prevTxid: Buffer; prevIndex: number; value: number; scriptPubKey: Buffer; sequence: number }[],
+  outputs: BtcOutput[],
+  schnorrSigs: Buffer[]
+): Buffer {
+  if (schnorrSigs.length !== inputs.length) {
+    throw new Error("Expected " + inputs.length + " signatures, got " + schnorrSigs.length);
+  }
+
+  const parts: Buffer[] = [];
+
+  // Version: 2
+  const ver = Buffer.alloc(4);
+  writeU32LE(ver, 2, 0);
+  parts.push(ver);
+
+  // Segwit marker + flag
+  parts.push(Buffer.from([0x00, 0x01]));
+
+  // Input count
+  parts.push(compactSize(inputs.length));
+
+  // Inputs (empty scriptSig for segwit)
+  for (const inp of inputs) {
+    const outpoint = Buffer.alloc(36);
+    inp.prevTxid.copy(outpoint, 0);
+    writeU32LE(outpoint, inp.prevIndex, 32);
+    parts.push(outpoint);
+    parts.push(compactSize(0));
+    const seq = Buffer.alloc(4);
+    writeU32LE(seq, inp.sequence, 0);
+    parts.push(seq);
+  }
+
+  // Output count
+  parts.push(compactSize(outputs.length));
+
+  // Outputs
+  for (const out of outputs) {
+    const valueBuf = Buffer.alloc(8);
+    writeI64LE(valueBuf, out.value, 0);
+    parts.push(valueBuf);
+    parts.push(compactSize(out.script.length));
+    parts.push(out.script);
+  }
+
+  // Witness data
+  for (const sig of schnorrSigs) {
+    if (sig.length !== 64) {
+      throw new Error("Schnorr signature must be 64 bytes, got " + sig.length);
+    }
+    parts.push(Buffer.from([0x01])); // 1 witness item
+    parts.push(compactSize(sig.length));
+    parts.push(sig);
+  }
+
+  // Locktime
+  const lt = Buffer.alloc(4);
+  writeU32LE(lt, 0, 0);
+  parts.push(lt);
+
+  return Buffer.concat(parts);
+}

@@ -60,6 +60,7 @@ import {
   broadcastTx,
   estimateFee,
   BRANCH_ID,
+  computeSighashV6,
 } from "./tx-builder.js";
 
 export {
@@ -70,8 +71,9 @@ export {
   broadcastTx,
   estimateFee,
   BRANCH_ID,
+  computeSighashV6,
 } from "./tx-builder.js";
-export type { UTXO } from "./tx-builder.js";
+export type { UTXO, V6SighashParams } from "./tx-builder.js";
 
 import {
   fetchBtcUTXOs,
@@ -82,6 +84,10 @@ import {
   broadcastBtcTx,
   estimateBtcFee,
   computeBtcSighash,
+  deriveTaprootAddress,
+  p2trScript,
+  buildTaprootTx,
+  serializeTaprootTx,
 } from "./btc-tx-builder.js";
 
 export {
@@ -93,8 +99,12 @@ export {
   broadcastBtcTx,
   estimateBtcFee,
   computeBtcSighash,
+  deriveTaprootAddress,
+  p2trScript,
+  buildTaprootTx,
+  serializeTaprootTx,
 } from "./btc-tx-builder.js";
-export type { BtcUTXO, BtcTxOutput, BtcNetwork } from "./btc-tx-builder.js";
+export type { BtcUTXO, BtcTxOutput, BtcNetwork, TaprootInput, TaprootTxParams } from "./btc-tx-builder.js";
 
 // Chain identifiers for wallet creation
 export type Chain = "zcash-transparent" | "bitcoin" | "ethereum";

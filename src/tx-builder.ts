@@ -722,3 +722,182 @@ export function estimateFee(numInputs: number, numOutputs: number): number {
   const graceActions = 2;
   return Math.max(graceActions, logicalActions) * 5000;
 }
+
+
+// ---------------------------------------------------------------------------
+// ZIP 246: v6 transaction sighash (NU7)
+// ---------------------------------------------------------------------------
+
+// Zcash v6 constants. Version group ID and NU7 branch ID are placeholders
+// until the protocol spec finalizes them. The sighash structure follows
+// ZIP 246 which extends ZIP 244 with two new header digest fields.
+const TX_VERSION_V6 = 6;
+const TX_VERSION_GROUP_ID_V6 = 0x26a7270a; // TODO: update when NU7 assigns new vgid
+
+export interface V6SighashParams {
+  /** UTXOs being spent */
+  utxos: UTXO[];
+  /** Recipient address */
+  recipient: string;
+  /** Send amount in zatoshis */
+  amount: number;
+  /** Explicit fee in zatoshis (ZIP 2002) */
+  fee: number;
+  /** Change address */
+  changeAddress: string;
+  /** Consensus branch ID (defaults to NU6.1 until NU7 is defined) */
+  branchId?: number;
+  /** NSM burn amount in zatoshis (ZIP 233), defaults to 0 */
+  zip233Amount?: number;
+  /** Lock time, defaults to 0 */
+  lockTime?: number;
+  /** Expiry height, defaults to 0 */
+  expiryHeight?: number;
+}
+
+/**
+ * Header digest for v6 transactions (ZIP 246 T.1).
+ *
+ * Extends the v5 header digest with two new fields appended:
+ *   T.1f: fee (8-byte LE uint64) per ZIP 2002
+ *   T.1g: zip233Amount (8-byte LE uint64) per ZIP 233 (NSM burn)
+ *
+ * Personalization: "ZTxIdHeadersHash" (same as v5)
+ */
+function headerDigestV6(
+  version: number,
+  versionGroupId: number,
+  branchId: number,
+  lockTime: number,
+  expiryHeight: number,
+  fee: number,
+  zip233Amount: number
+): Buffer {
+  const data = Buffer.alloc(36);
+  writeU32LE(data, (version | (1 << 31)) >>> 0, 0);
+  writeU32LE(data, versionGroupId, 4);
+  writeU32LE(data, branchId, 8);
+  writeU32LE(data, lockTime, 12);
+  writeU32LE(data, expiryHeight, 16);
+  writeI64LE(data, fee, 20);
+  writeI64LE(data, zip233Amount, 28);
+  return blake2b256(data, personalization("ZTxIdHeadersHash"));
+}
+
+/**
+ * Compute per-input sighash for a v6 transparent transaction (ZIP 246).
+ *
+ * Structure mirrors ZIP 244 signature_digest but uses headerDigestV6
+ * which includes the explicit fee and NSM burn amount.
+ *
+ * Returns per-input sighashes ready for MPC signing.
+ *
+ * NOTE: NU7 is not yet activated. The v6 version group ID and branch ID
+ * are placeholders. This function will produce structurally correct
+ * sighashes once the constants are finalized.
+ */
+export function computeSighashV6(params: V6SighashParams): {
+  sighashes: Buffer[];
+  txid: Buffer;
+} {
+  const {
+    utxos,
+    recipient,
+    amount,
+    fee,
+    changeAddress,
+    branchId = BRANCH_ID.NU61, // TODO: replace with NU7 branch ID when defined
+    zip233Amount = 0,
+    lockTime = 0,
+    expiryHeight = 0,
+  } = params;
+
+  if (utxos.length === 0) throw new Error("No UTXOs provided");
+  if (amount <= 0) throw new Error("Amount must be positive");
+  if (fee < 0) throw new Error("Fee must be non-negative");
+
+  const inputs: TransparentInput[] = utxos.map((u) => ({
+    prevTxid: reverseTxid(u.txid),
+    prevIndex: u.outputIndex,
+    script: Buffer.from(u.script, "hex"),
+    value: u.satoshis,
+    sequence: 0xffffffff,
+  }));
+
+  const totalInput = utxos.reduce((s, u) => s + u.satoshis, 0);
+  const change = totalInput - amount - fee;
+
+  const outputs: TransparentOutput[] = [
+    { value: amount, script: scriptFromAddress(recipient) },
+  ];
+
+  if (change > 0 && change >= 546) {
+    outputs.push({ value: change, script: scriptFromAddress(changeAddress) });
+  } else if (change < 0) {
+    throw new Error(
+      "UTXOs total " + totalInput + " < amount " + amount + " + fee " + fee
+    );
+  }
+
+  // V6 header digest with fee and zip233Amount
+  const hdrDigest = headerDigestV6(
+    TX_VERSION_V6, TX_VERSION_GROUP_ID_V6, branchId,
+    lockTime, expiryHeight, fee, zip233Amount
+  );
+
+  // Transparent digest components (same as v5 / ZIP 244)
+  const prevoutsSigDigest = hashPrevouts(inputs, branchId);
+  const amountsSigDigest = hashAmounts(inputs, branchId);
+  const scriptpubkeysSigDigest = hashScriptPubKeys(inputs, branchId);
+  const sequenceSigDigest = hashSequences(inputs, branchId);
+  const outputsSigDigest = hashOutputs(outputs, branchId);
+
+  // Empty bundle digests (transparent-only tx)
+  const sapDigest = emptyBundleDigest("ZTxIdSaplingHash");
+  const orchDigest = emptyBundleDigest("ZTxIdOrchardHash");
+
+  const sighashes: Buffer[] = [];
+  for (let i = 0; i < inputs.length; i++) {
+    const inp = inputs[i];
+    const prevout = Buffer.alloc(36);
+    inp.prevTxid.copy(prevout, 0);
+    writeU32LE(prevout, inp.prevIndex, 32);
+    const valueBuf = Buffer.alloc(8);
+    writeI64LE(valueBuf, inp.value, 0);
+    const seqBuf = Buffer.alloc(4);
+    writeU32LE(seqBuf, inp.sequence, 0);
+
+    const txinSigDigest = blake2b256(
+      Buffer.concat([prevout, valueBuf, compactSize(inp.script.length), inp.script, seqBuf]),
+      personalization("Zcash___TxInHash")
+    );
+
+    const transparentSigDig = blake2b256(
+      Buffer.concat([
+        Buffer.from([SIGHASH_ALL]),
+        prevoutsSigDigest,
+        amountsSigDigest,
+        scriptpubkeysSigDigest,
+        sequenceSigDigest,
+        outputsSigDigest,
+        txinSigDigest,
+      ]),
+      personalization("ZTxIdTranspaHash")
+    );
+
+    const sighash = blake2b256(
+      Buffer.concat([hdrDigest, transparentSigDig, sapDigest, orchDigest]),
+      personalization("ZcashTxHash_", branchIdBytes(branchId))
+    );
+    sighashes.push(sighash);
+  }
+
+  // Compute txid digest using v6 header
+  const txpDigest = transparentDigest(inputs, outputs, branchId);
+  const txid = blake2b256(
+    Buffer.concat([hdrDigest, txpDigest, sapDigest, orchDigest]),
+    personalization("ZcashTxHash__", branchIdBytes(branchId))
+  );
+
+  return { sighashes, txid };
+}
