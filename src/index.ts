@@ -700,6 +700,8 @@ export async function sign(
     throw new Error("Presign TX succeeded but timed out waiting for completion. Check Ika network status.");
   }
 
+  // Re-fetch IKA coin - presign TX mutated the object, version is stale
+  const freshIkaCoinId = await findIkaCoin(rpcUrl, address);
   // TX 2: Approve message + sign
   const hashEnum = Hash[params.hash as keyof typeof Hash] as any;
   const signTx = new Transaction();
@@ -729,7 +731,7 @@ export async function sign(
     presign: completedPresign,
     message: request.messageHash,
     signatureScheme: SignatureAlgorithm.ECDSASecp256k1,
-    ikaCoin: signTx.splitCoins(signTx.object(ikaCoinId), [50_000_000]),
+    ikaCoin: signTx.splitCoins(signTx.object(freshIkaCoinId), [50_000_000]),
     suiCoin: signTx.splitCoins(signTx.gas, [50_000_000]),
   });
 
