@@ -197,3 +197,23 @@ SUI_PRIVATE_KEY=... node dist/test-e2e.js
 ## License
 
 MIT
+
+## quickstart
+
+```bash
+npm i @frontiercompute/zcash-ika
+```
+
+```typescript
+import { IkaClient, SignatureAlgorithm } from "@frontiercompute/zcash-ika";
+
+// create a split-key wallet via Ika 2PC-MPC
+const client = new IkaClient({ network: "testnet" });
+const wallet = await client.createWallet(SignatureAlgorithm.Secp256k1);
+
+// sign a zcash transaction (neither party sees the full key)
+const sig = await client.sign(wallet.id, txHash);
+```
+
+54 exports.  BTC + ZEC + EVM signing.  threshold custody without trust assumptions.
+
