@@ -13,7 +13,7 @@ One secp256k1 dWallet on [Ika's 2PC-MPC network](https://ika.xyz) signs for thre
 - **Spend policy** enforced by Sui Move contract (per-tx limits, daily caps, recipient whitelist, emergency freeze)
 - **Transparent TX builder** for Zcash v5 transactions (ZIP 244 sighash, P2PKH, UTXO selection)
 - **Attestation** of every operation to Zcash mainnet via [ZAP1](https://pay.frontiercompute.io)
-- **5-chain verification** of attestation proofs (Arbitrum, Base, Hyperliquid, Solana, NEAR)
+- **6-chain verification of attestation proofs (Ethereum, Arbitrum, Base, Hyperliquid, NEAR, Sui)
 
 ## Chain support
 
@@ -113,7 +113,7 @@ TX Builder (Zcash v5, ZIP 244)
 ZAP1 Attestation (Zcash mainnet)
   +-- every spend recorded in Merkle tree
   +-- anchored to Zcash blockchain
-  +-- verified on 5 EVM/L1 chains
+  +-- verified on 6 mainnet chains
 ```
 
 ## Sign flow
@@ -153,7 +153,7 @@ secp256k1 dWallet on Ika testnet:
 - Compressed pubkey: `03ba9e85a85674df494520c2e80b804656fac54fe68668266f33fee9b03ad4b069`
 - Derived ZEC t-addr: `t1Rqh1TKqXsSiaV4wrSDandEPccucpHEudn`
 
-Attestation anchors verified on Arbitrum, Base, Hyperliquid, Solana, NEAR testnet.
+Attestation anchors verified on Ethereum, Arbitrum, Base, Hyperliquid, NEAR, Sui.
 
 ## Environment variables
 
@@ -189,7 +189,7 @@ SUI_PRIVATE_KEY=... node dist/test-e2e.js
 
 | Package | What it does |
 |---------|-------------|
-| [@frontiercompute/zcash-mcp](https://www.npmjs.com/package/@frontiercompute/zcash-mcp) | MCP server for Zcash (22 tools) |
+| [@frontiercompute/zcash-mcp](https://www.npmjs.com/package/@frontiercompute/zcash-mcp) | MCP server for Zcash (12 tools) |
 | [@frontiercompute/openclaw-zap1](https://www.npmjs.com/package/@frontiercompute/openclaw-zap1) | OpenClaw skill for ZAP1 attestation |
 | [@frontiercompute/zap1](https://www.npmjs.com/package/@frontiercompute/zap1) | ZAP1 attestation client |
 | [@frontiercompute/silo-zap1](https://www.npmjs.com/package/@frontiercompute/silo-zap1) | Silo agent attestation via ZAP1 |
@@ -215,5 +215,5 @@ const wallet = await client.createWallet(SignatureAlgorithm.Secp256k1);
 const sig = await client.sign(wallet.id, txHash);
 ```
 
-54 exports.  BTC + ZEC + EVM signing.  threshold custody without trust assumptions.
+54 exports.  BTC + ZEC + EVM signing.  honest-majority MPC custody.
 
